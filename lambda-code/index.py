@@ -1,4 +1,5 @@
 import json
+import os
 from common import (
     get_article_from_contentful,
     get_tags_from_contentful_cached,
@@ -15,7 +16,7 @@ def lambda_handler(event, context):
             body = event
         
         slug = body.get('slug', '')
-        model_id = body.get('model', None)
+        model_id = body.get('model', None) or os.environ.get('MODEL_ID')
         
         if not slug:
             return {
