@@ -26,7 +26,7 @@ Contentfulから記事を取得し、3つのAIモデル（Claude Haiku、Amazon 
 ## CloudFormationテンプレート
 
 ### 環境変数ベース価格設定（推奨）
-- **`claude_cloudformation_env_pricing.yaml`** - Claude環境変数価格版
+- **`claude_cloudformation.yaml`** - Claude版
 - **`nova_cloudformation.yaml`** - Nova Lite版  
 - **`gpt_cloudformation.yaml`** - GPT-OSS 20B版
 
@@ -38,10 +38,10 @@ Contentfulから記事を取得し、3つのAIモデル（Claude Haiku、Amazon 
 ## デプロイ方法
 
 ```bash
-# Claude環境変数価格版（推奨）
+# Claude版（推奨）
 aws cloudformation deploy \
-  --template-file claude_cloudformation_env_pricing.yaml \
-  --stack-name tag-selector-claude-env \
+  --template-file claude_cloudformation.yaml \
+  --stack-name tag-selector-claude \
   --capabilities CAPABILITY_IAM
 
 # Nova版
@@ -79,7 +79,7 @@ docker run --rm -e AWS_DEFAULT_REGION=ap-northeast-1 -v ~/.aws:/root/.aws:ro gpt
 
 ```
 ├── README.md                           # プロジェクト概要
-├── claude_cloudformation_env_pricing.yaml  # Claude環境変数版（推奨）
+├── claude_cloudformation.yaml          # Claude版（推奨）
 ├── nova_cloudformation.yaml           # Nova版
 ├── gpt_cloudformation.yaml            # GPT版
 ├── lambda-code/                        # 開発用ソースコード
