@@ -5,19 +5,19 @@
 ### Haiku テスト
 ```bash
 docker build -f tests/Dockerfile.haiku-test -t haiku-test .
-docker run --rm -e AWS_DEFAULT_REGION=ap-northeast-1 -v ~/.aws:/root/.aws:ro haiku-test
+docker run --rm -e AWS_DEFAULT_REGION=us-west-2 -v ~/.aws:/root/.aws:ro haiku-test
 ```
 
 ### Nova テスト
 ```bash
 docker build -f tests/Dockerfile.nova-test -t nova-test .
-docker run --rm -e AWS_DEFAULT_REGION=ap-northeast-1 -v ~/.aws:/root/.aws:ro nova-test
+docker run --rm -e AWS_DEFAULT_REGION=us-west-2 -v ~/.aws:/root/.aws:ro nova-test
 ```
 
 ### GPT テスト
 ```bash
 docker build -f tests/Dockerfile.gpt-test -t gpt-test .
-docker run --rm -e AWS_DEFAULT_REGION=ap-northeast-1 -v ~/.aws:/root/.aws:ro gpt-test
+docker run --rm -e AWS_DEFAULT_REGION=us-west-2 -v ~/.aws:/root/.aws:ro gpt-test
 ```
 
 ## テストファイル
@@ -33,3 +33,8 @@ docker run --rm -e AWS_DEFAULT_REGION=ap-northeast-1 -v ~/.aws:/root/.aws:ro gpt
 - `INPUT_PRICE_PER_MILLION` - 入力トークン価格（USD/100万トークン）
 - `OUTPUT_PRICE_PER_MILLION` - 出力トークン価格（USD/100万トークン）
 - `USD_TO_JPY` - 為替レート
+
+## リージョン設定
+
+- **デフォルトリージョン**: us-west-2（オレゴン）
+- **モデルID**: リージョン対応版を使用

@@ -4,7 +4,8 @@ import os
 
 # 環境変数設定（Nova用）
 os.environ['CONTENTFUL_ACCESS_TOKEN'] = "6Z4wPWStkHj3d_EA0MQt89nWJpIFSBJcmAQ_YzDpkAg"
-os.environ['MODEL_ID'] = "amazon.nova-lite-v1:0"  # グローバル版を試行
+os.environ['MODEL_ID'] = "us.amazon.nova-lite-v1:0"  # us-west-2用
+os.environ['AWS_DEFAULT_REGION'] = 'us-west-2'
 # Nova価格設定
 os.environ['INPUT_PRICE_PER_MILLION'] = '0.06'
 os.environ['OUTPUT_PRICE_PER_MILLION'] = '0.24'

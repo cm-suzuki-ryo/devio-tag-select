@@ -110,22 +110,21 @@ def evaluate_tags_with_llm(text, tag_scores, model_id):
     
     tags_text = '\n'.join(tag_list)
     
-    # LLMプロンプト
-    prompt = f"""以下の記事内容に最も適合するタグを評価してください。
-
-記事内容:
+    # LLMプロンプト（最適化版）
+    prompt = f"""記事内容:
 {text}
+
+上記記事に最適なタグを選択してください。
 
 タグ候補:
 {tags_text}
 
-各タグの適合度を1-10で評価し、適合度の高い順にランキングしてください。
-出力形式: タグID,適合度スコア,タグ名
+要求:
+- 最大10個選択
+- 適合度: 1-100（100=完全一致、1=無関係）
+- 出力: JSON形式のみ
 
-例:
-12345,9,AWS Lambda
-67890,8,機械学習
-"""
+{{"tags": [{{"id": "123", "name": "タグ名", "score": 85}}]}}"""
 
     bedrock = boto3.client('bedrock-runtime')
     
@@ -176,10 +175,45 @@ def evaluate_tags_with_llm(text, tag_scores, model_id):
     return ranked_tags, cache_info
 
 def parse_llm_ranking(result_text, original_tags):
-    """LLMの評価結果をパース"""
+    """LLMの評価結果をパース（JSON形式対応）"""
     ranked_tags = []
     tag_dict = {tag['id']: tag for tag in original_tags}
     
+    try:
+        # JSON形式の解析を試行
+        import json
+        import re
+        
+        # JSONを抽出
+        json_match = re.search(r'\{.*"tags".*\}', result_text, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(0)
+            data = json.loads(json_str)
+            
+            for tag_item in data.get('tags', []):
+                tag_id = str(tag_item.get('id', ''))
+                score = tag_item.get('score', 0)
+                # 文字列と数値の両方に対応
+                if isinstance(score, str):
+                    score = int(score) if score.isdigit() else 0
+                else:
+                    score = int(score)
+                
+                if tag_id in tag_dict:
+                    original_tag = tag_dict[tag_id]
+                    ranked_tag = original_tag.copy()
+                    ranked_tag['llm_score'] = score
+                    ranked_tag['final_score'] = original_tag['score'] + score
+                    ranked_tags.append(ranked_tag)
+            
+            # スコア順でソート
+            ranked_tags.sort(key=lambda x: x['llm_score'], reverse=True)
+            return ranked_tags
+    
+    except Exception as e:
+        print(f"JSON parsing failed: {e}")
+    
+    # フォールバック: CSV形式の解析
     lines = result_text.strip().split('\n')
     for line in lines:
         if ',' in line:

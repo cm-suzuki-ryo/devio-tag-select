@@ -4,7 +4,8 @@ import os
 
 # 環境変数設定（GPT用）
 os.environ['CONTENTFUL_ACCESS_TOKEN'] = "6Z4wPWStkHj3d_EA0MQt89nWJpIFSBJcmAQ_YzDpkAg"
-os.environ['MODEL_ID'] = "openai.gpt-oss-20b-1:0"  # ap-northeast-1用
+os.environ['MODEL_ID'] = "openai.gpt-oss-20b-1:0"  # us-west-2用
+os.environ['AWS_DEFAULT_REGION'] = 'us-west-2'
 # GPT価格設定
 os.environ['INPUT_PRICE_PER_MILLION'] = '0.15'
 os.environ['OUTPUT_PRICE_PER_MILLION'] = '0.6'

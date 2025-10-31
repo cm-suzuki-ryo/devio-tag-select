@@ -15,13 +15,13 @@ Contentfulから記事を取得し、3つのAIモデル（Claude Haiku、Amazon 
 - **LLM評価**: 100段階精密評価
 - **結果出力**: 上位20タグ選択
 
-## 対応モデル
+## 対応モデル（us-west-2リージョン）
 
-| モデル | コスト | 精度 | 処理時間 | 特徴 |
-|--------|--------|------|----------|------|
-| **Nova Lite** | 0.16円 | 95点 | 7秒 | **最高コスパ** |
-| **GPT-OSS 20B** | 0.43円 | 98点 | 11秒 | 高精度 |
-| **Claude Haiku 4.5** | 0.56円 | 95点 | 9秒 | バランス良好 |
+| モデル | コスト | 精度 | 処理時間 | 特徴 | モデルID |
+|--------|--------|------|----------|------|----------|
+| **Nova Lite** | 0.13円 | 95点 | 7秒 | **最高コスパ** | `us.amazon.nova-lite-v1:0` |
+| **GPT-OSS 20B** | 0.43円 | 98点 | 11秒 | 高精度 | `openai.gpt-oss-20b-1:0` |
+| **Claude Haiku 4.5** | 0.55円 | 95点 | 9秒 | バランス良好 | `global.anthropic.claude-haiku-4-5-20251001-v1:0` |
 
 ## CloudFormationテンプレート
 
@@ -64,15 +64,15 @@ aws cloudformation deploy \
 ```bash
 # Haikuテスト
 docker build -f tests/Dockerfile.haiku-test -t haiku-test .
-docker run --rm -e AWS_DEFAULT_REGION=ap-northeast-1 -v ~/.aws:/root/.aws:ro haiku-test
+docker run --rm -e AWS_DEFAULT_REGION=us-west-2 -v ~/.aws:/root/.aws:ro haiku-test
 
 # Novaテスト
 docker build -f tests/Dockerfile.nova-test -t nova-test .
-docker run --rm -e AWS_DEFAULT_REGION=ap-northeast-1 -v ~/.aws:/root/.aws:ro nova-test
+docker run --rm -e AWS_DEFAULT_REGION=us-west-2 -v ~/.aws:/root/.aws:ro nova-test
 
 # GPTテスト
 docker build -f tests/Dockerfile.gpt-test -t gpt-test .
-docker run --rm -e AWS_DEFAULT_REGION=ap-northeast-1 -v ~/.aws:/root/.aws:ro gpt-test
+docker run --rm -e AWS_DEFAULT_REGION=us-west-2 -v ~/.aws:/root/.aws:ro gpt-test
 ```
 
 ## プロジェクト構成
@@ -105,6 +105,7 @@ docker run --rm -e AWS_DEFAULT_REGION=ap-northeast-1 -v ~/.aws:/root/.aws:ro gpt
 ## 技術仕様
 
 - **言語**: Python 3.11
+- **AWS リージョン**: us-west-2（オレゴン）
 - **AWS サービス**: Lambda, Bedrock, CloudFormation
 - **外部API**: Contentful
 - **形態素解析**: MeCab（フォールバック付き）
