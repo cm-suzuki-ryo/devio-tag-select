@@ -111,8 +111,22 @@ git push origin main
 
 ### テンプレート一覧
 - **`claude_cloudformation_complete.yaml`** - Claude Haiku 4.5完全版
+- **`claude_cloudformation_env_pricing.yaml`** - Claude環境変数価格版（推奨）
 - **`nova_cloudformation_enhanced.yaml`** - Nova Lite改良版  
 - **`gpt_cloudformation_enhanced.yaml`** - GPT-OSS 20B改良版
+
+### 環境変数ベース価格設定（推奨）
+モデル価格をハードコードではなく環境変数で管理する改良版を実装：
+
+#### 環境変数
+- `INPUT_PRICE_PER_MILLION`: 入力トークン価格（USD/100万トークン）
+- `OUTPUT_PRICE_PER_MILLION`: 出力トークン価格（USD/100万トークン）  
+- `USD_TO_JPY`: 為替レート（USD→JPY）
+
+#### メリット
+- **保守性向上**: 価格変更時にコード修正不要
+- **モデル非依存**: 同一コードで複数モデル対応
+- **運用効率**: 環境変数変更のみで価格更新
 
 ### 完全版の特徴
 
@@ -138,6 +152,12 @@ aws cloudformation deploy \
   --stack-name tag-selector-claude-complete \
   --capabilities CAPABILITY_IAM
 
+# Claude環境変数価格版（推奨）
+aws cloudformation deploy \
+  --template-file claude_cloudformation_env_pricing.yaml \
+  --stack-name tag-selector-claude-env \
+  --capabilities CAPABILITY_IAM
+
 # Nova改良版
 aws cloudformation deploy \
   --template-file nova_cloudformation_enhanced.yaml \
@@ -157,11 +177,15 @@ aws cloudformation deploy \
 - **GPT**: `openai.gpt-oss-20b-1:0`
 
 #### 性能比較
-| モデル | コスト | 精度 | 処理時間 | 特徴 |
-|--------|--------|------|----------|------|
-| **Claude Haiku 4.5** | 0.47円 | 95点 | 9秒 | バランス良好 |
-| **Nova Lite** | 0.14円 | 95点 | 7秒 | 最高コスパ |
-| **GPT-OSS 20B** | 0.50円 | 98点 | 11秒 | 最高精度 |
+| モデル | コスト | 精度 | 処理時間 | 特徴 | 価格設定 |
+|--------|--------|------|----------|------|----------|
+| **Claude Haiku 4.5** | 0.21円 | 95点 | 9秒 | バランス良好 | 環境変数対応 |
+| **Nova Lite** | 0.14円 | 95点 | 7秒 | 最高コスパ | 従来版 |
+| **GPT-OSS 20B** | 0.50円 | 98点 | 11秒 | 最高精度 | 従来版 |
+
+#### 価格設定方式
+- **環境変数版**: INPUT_PRICE_PER_MILLION, OUTPUT_PRICE_PER_MILLION, USD_TO_JPY
+- **従来版**: モデル別ハードコード価格辞書
 
 #### Lambda関数URL
 - **認証**: NONE（パブリックアクセス）
