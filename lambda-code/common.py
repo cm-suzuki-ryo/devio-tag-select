@@ -56,13 +56,15 @@ def get_tags_from_contentful_cached():
     
     return tags_data, content_hash
 
-def pre_filter_tags(blog_text, all_tags, max_tags=100):
+def pre_filter_tags(blog_text, all_tags, max_tags=1000):
     """記事内容に基づいてタグを事前フィルタリング"""
     blog_lower = blog_text.lower()
     keywords = re.findall(r'[A-Za-z0-9]+|[ぁ-んァ-ヶ一-龯]+', blog_text)
     keywords = [k.lower() for k in keywords if len(k) >= 2]
     
     scored_tags = []
+    max_score = 0
+    
     for tag in all_tags:
         tag_id = str(tag.get('id', ''))
         tag_name = tag.get('name', '')
@@ -85,10 +87,25 @@ def pre_filter_tags(blog_text, all_tags, max_tags=100):
                 score += 2
         
         if score > 0:
-            scored_tags.append((score, f"{tag_id}\t{tag_name}"))
+            scored_tags.append((score, f"{tag_id}\t{tag_name}", tag_id, tag_name))
+            max_score = max(max_score, score)
     
     scored_tags.sort(reverse=True, key=lambda x: x[0])
-    return [tag for _, tag in scored_tags[:max_tags]]
+    
+    # タグ情報とスコア情報を分けて返す
+    filtered_tags = [tag for _, tag, _, _ in scored_tags[:max_tags]]
+    tag_scores = []
+    
+    for score, _, tag_id, tag_name in scored_tags[:max_tags]:
+        relevance_percentage = round((score / max_score * 100) if max_score > 0 else 0, 1)
+        tag_scores.append({
+            'id': tag_id,
+            'name': tag_name,
+            'score': score,
+            'relevance_percentage': relevance_percentage
+        })
+    
+    return filtered_tags, tag_scores
 
 def calculate_cost(model_id, cache_info):
     """モデル使用料金を計算"""

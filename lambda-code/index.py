@@ -32,7 +32,7 @@ def lambda_handler(event, context):
             }
         
         tags_data, tags_hash = get_tags_from_contentful_cached()
-        filtered_tags = pre_filter_tags(blog_text, tags_data, max_tags=100)
+        filtered_tags, tag_scores = pre_filter_tags(blog_text, tags_data, max_tags=1000)
         
         # 文字数チェック
         is_long_article = len(blog_text) > 2000
@@ -41,25 +41,17 @@ def lambda_handler(event, context):
         if not model_id:
             model_id = 'us.anthropic.claude-haiku-4-5-20251001-v1:0'
         
-        # 単一モデル実行
-        selected_tags, cache_info = process_article_with_model(
-            blog_text, filtered_tags, tags_hash, model_id, is_long_article
-        )
-        cost_info = calculate_cost(model_id, cache_info)
-        
         return {
             'statusCode': 200,
             'body': json.dumps({
                 'slug': slug,
                 'model': model_id,
-                'selected_tags': selected_tags,
+                'tag_candidates': tag_scores[:20],  # 上位20個の候補とスコア
                 'tags_hash': tags_hash[:8],
                 'filtered_count': len(filtered_tags),
                 'total_tags_count': len(tags_data),
                 'is_long_article': is_long_article,
-                'article_length': len(blog_text),
-                'cache_info': cache_info,
-                'cost_jpy': cost_info
+                'article_length': len(blog_text)
             }, ensure_ascii=False)
         }
         
