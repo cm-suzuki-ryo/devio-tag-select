@@ -108,33 +108,23 @@ def pre_filter_tags(blog_text, all_tags, max_tags=1000):
     return filtered_tags, tag_scores
 
 def calculate_cost(model_id, cache_info):
-    """モデル使用料金を計算"""
-    usd_to_jpy = 150
+    """環境変数ベースのモデル使用料金計算"""
     input_tokens = cache_info.get('input_tokens', 0)
     output_tokens = cache_info.get('output_tokens', 0)
     
-    pricing = {
-        'us.anthropic.claude-haiku-4-5-20251001-v1:0': {'input': 0.25, 'output': 1.25},
-        'us.amazon.nova-lite-v1:0': {'input': 0.06, 'output': 0.24},
-        'openai.gpt-oss-20b-1:0': {'input': 0.15, 'output': 0.6}
-    }
+    # 環境変数から価格情報を取得
+    input_price = float(os.environ.get('INPUT_PRICE_PER_MILLION', '0.25'))
+    output_price = float(os.environ.get('OUTPUT_PRICE_PER_MILLION', '1.25'))
+    usd_to_jpy = float(os.environ.get('USD_TO_JPY', '150'))
     
-    if model_id not in pricing:
-        return {'error': 'Unknown model pricing'}
-    
-    model_pricing = pricing[model_id]
-    input_cost_usd = (input_tokens / 1_000_000) * model_pricing['input']
-    output_cost_usd = (output_tokens / 1_000_000) * model_pricing['output']
+    input_cost_usd = (input_tokens / 1_000_000) * input_price
+    output_cost_usd = (output_tokens / 1_000_000) * output_price
     total_cost_usd = input_cost_usd + output_cost_usd
     
-    input_cost_jpy = input_cost_usd * usd_to_jpy
-    output_cost_jpy = output_cost_usd * usd_to_jpy
-    total_cost_jpy = total_cost_usd * usd_to_jpy
-    
     result = {
-        'input_cost_jpy': round(input_cost_jpy, 4),
-        'output_cost_jpy': round(output_cost_jpy, 4),
-        'total_cost_jpy': round(total_cost_jpy, 4),
+        'input_cost_jpy': round(input_cost_usd * usd_to_jpy, 4),
+        'output_cost_jpy': round(output_cost_usd * usd_to_jpy, 4),
+        'total_cost_jpy': round(total_cost_usd * usd_to_jpy, 4),
         'exchange_rate': usd_to_jpy
     }
     
@@ -145,12 +135,11 @@ def calculate_cost(model_id, cache_info):
         tag_input = cache_info.get('tag_input_tokens', 0)
         tag_output = cache_info.get('tag_output_tokens', 0)
         
-        # 要約作成コスト（Claude Haiku固定）
-        haiku_pricing = pricing['us.anthropic.claude-haiku-4-5-20251001-v1:0']
-        summary_cost_usd = (summary_input / 1_000_000) * haiku_pricing['input'] + (summary_output / 1_000_000) * haiku_pricing['output']
+        # 要約作成コスト
+        summary_cost_usd = (summary_input / 1_000_000) * input_price + (summary_output / 1_000_000) * output_price
         
         # タグ選択コスト
-        tag_cost_usd = (tag_input / 1_000_000) * model_pricing['input'] + (tag_output / 1_000_000) * model_pricing['output']
+        tag_cost_usd = (tag_input / 1_000_000) * input_price + (tag_output / 1_000_000) * output_price
         
         result['summary_cost_jpy'] = round(summary_cost_usd * usd_to_jpy, 4)
         result['tag_selection_cost_jpy'] = round(tag_cost_usd * usd_to_jpy, 4)
