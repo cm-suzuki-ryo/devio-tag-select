@@ -27,8 +27,8 @@ Contentfulから記事を取得し、3つのAIモデル（Claude Haiku、Amazon 
 
 ### 環境変数ベース価格設定（推奨）
 - **`claude_cloudformation_env_pricing.yaml`** - Claude環境変数価格版
-- **`nova_cloudformation_enhanced.yaml`** - Nova Lite改良版  
-- **`gpt_cloudformation_enhanced.yaml`** - GPT-OSS 20B改良版
+- **`nova_cloudformation.yaml`** - Nova Lite版  
+- **`gpt_cloudformation.yaml`** - GPT-OSS 20B版
 
 ### 環境変数
 - `INPUT_PRICE_PER_MILLION`: 入力トークン価格（USD/100万トークン）
@@ -44,16 +44,16 @@ aws cloudformation deploy \
   --stack-name tag-selector-claude-env \
   --capabilities CAPABILITY_IAM
 
-# Nova改良版
+# Nova版
 aws cloudformation deploy \
-  --template-file nova_cloudformation_enhanced.yaml \
-  --stack-name tag-selector-nova-enhanced \
+  --template-file nova_cloudformation.yaml \
+  --stack-name tag-selector-nova \
   --capabilities CAPABILITY_IAM
 
-# GPT改良版
+# GPT版
 aws cloudformation deploy \
-  --template-file gpt_cloudformation_enhanced.yaml \
-  --stack-name tag-selector-gpt-enhanced \
+  --template-file gpt_cloudformation.yaml \
+  --stack-name tag-selector-gpt \
   --capabilities CAPABILITY_IAM
 ```
 
@@ -80,8 +80,8 @@ docker run --rm -e AWS_DEFAULT_REGION=ap-northeast-1 -v ~/.aws:/root/.aws:ro gpt
 ```
 ├── README.md                           # プロジェクト概要
 ├── claude_cloudformation_env_pricing.yaml  # Claude環境変数版（推奨）
-├── nova_cloudformation_enhanced.yaml   # Nova改良版
-├── gpt_cloudformation_enhanced.yaml    # GPT改良版
+├── nova_cloudformation.yaml           # Nova版
+├── gpt_cloudformation.yaml            # GPT版
 ├── lambda-code/                        # 開発用ソースコード
 │   ├── enhanced_index.py              # メイン処理
 │   ├── common.py                      # 共通関数（環境変数ベース価格）
