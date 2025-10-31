@@ -138,8 +138,7 @@ def evaluate_tags_with_llm(text, tag_scores, model_id):
     elif 'amazon.nova' in model_id:
         body = {
             "messages": [{"role": "user", "content": [{"text": prompt}]}],
-            "max_tokens": 2000,
-            "temperature": 0.1
+            "inferenceConfig": {"temperature": 0.1}
         }
     elif 'openai' in model_id:
         body = {

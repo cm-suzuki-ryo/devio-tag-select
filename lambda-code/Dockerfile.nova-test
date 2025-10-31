@@ -1,0 +1,30 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# 必要なパッケージをインストール
+RUN apt-get update && apt-get install -y \
+    mecab \
+    libmecab-dev \
+    mecab-ipadic-utf8 \
+    && rm -rf /var/lib/apt/lists/*
+
+# MeCab設定ファイルを作成
+RUN echo "dicdir = /var/lib/mecab/dic/ipadic-utf8" > /etc/mecabrc
+
+# Pythonパッケージをインストール
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+RUN pip install mecab-python3 boto3 urllib3
+
+# 全ての必要なファイルをコピー
+COPY enhanced_index.py .
+COPY enhanced_common.py .
+COPY common.py .
+COPY model_router.py .
+COPY claude_model.py .
+COPY nova_model.py .
+COPY gpt_model.py .
+COPY test_nova.py .
+
+CMD ["python3", "test_nova.py"]

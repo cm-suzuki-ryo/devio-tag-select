@@ -12,7 +12,7 @@ def invoke_nova_model(blog_text, filtered_tags, tags_hash, model_id):
     
     body = {
         "messages": [{"role": "user", "content": [{"text": combined_prompt}]}],
-        "inferenceConfig": {"maxTokens": 8192, "temperature": 0}
+        "inferenceConfig": {"temperature": 0}
     }
     
     response = bedrock.invoke_model(modelId=model_id, body=json.dumps(body))
@@ -39,7 +39,7 @@ def create_summary_with_nova(blog_text, model_id):
     
     body = {
         "messages": [{"role": "user", "content": [{"text": prompt}]}],
-        "inferenceConfig": {"maxTokens": 8192, "temperature": 0}
+        "inferenceConfig": {"temperature": 0}
     }
     
     response = bedrock.invoke_model(modelId=model_id, body=json.dumps(body))

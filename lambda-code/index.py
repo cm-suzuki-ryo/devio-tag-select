@@ -188,7 +188,7 @@ def evaluate_tag_relevance(text, tags_text, model_id):
         
         body = {
             "messages": [{"role": "user", "content": [{"text": combined_prompt}]}],
-            "inferenceConfig": {"maxTokens": 8192, "temperature": 0}
+            "inferenceConfig": {"temperature": 0}
         }
     else:  # GPT-OSS
         system_content = f"あなたはブログ記事の内容分析とタグ適合度評価の専門家です。以下のタグリストの各タグについて、記事内容との適合度を0-10のスコアで評価してください。\n\nタグリスト:\n{tags_text}\n\n評価基準:\n10: 完全に一致、記事の核心的内容\n8-9: 高い関連性、重要な要素\n6-7: 中程度の関連性\n4-5: 低い関連性\n1-3: わずかな関連性\n0: 関連性なし\n\n<thinking>タグ内で推論を行い、最終的に以下の形式でJSONのみを出力してください: {{\"scores\": {{\"タグID\": スコア, \"タグID\": スコア}}}}"

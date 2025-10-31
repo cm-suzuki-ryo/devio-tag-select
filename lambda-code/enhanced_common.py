@@ -7,8 +7,18 @@ import hashlib
 # MeCabのインポート（フォールバック付き）
 try:
     import MeCab
-    MECAB_AVAILABLE = True
-    tagger = MeCab.Tagger('-Owakati')
+    # MeCab設定を試行
+    try:
+        tagger = MeCab.Tagger('-Owakati')
+        MECAB_AVAILABLE = True
+    except:
+        try:
+            # 辞書パスを明示的に指定
+            tagger = MeCab.Tagger('-Owakati -d /var/lib/mecab/dic/ipadic-utf8')
+            MECAB_AVAILABLE = True
+        except:
+            MECAB_AVAILABLE = False
+            tagger = None
 except ImportError:
     MECAB_AVAILABLE = False
     tagger = None

@@ -2,12 +2,12 @@
 import json
 import os
 
-# 環境変数設定
+# 環境変数設定（Nova用）
 os.environ['CONTENTFUL_ACCESS_TOKEN'] = "6Z4wPWStkHj3d_EA0MQt89nWJpIFSBJcmAQ_YzDpkAg"
-os.environ['MODEL_ID'] = "global.anthropic.claude-haiku-4-5-20251001-v1:0"  # ap-northeast-1用
-# 価格設定（環境変数ベース）
-os.environ['INPUT_PRICE_PER_MILLION'] = '0.25'
-os.environ['OUTPUT_PRICE_PER_MILLION'] = '1.25'
+os.environ['MODEL_ID'] = "amazon.nova-lite-v1:0"  # グローバル版を試行
+# Nova価格設定
+os.environ['INPUT_PRICE_PER_MILLION'] = '0.06'
+os.environ['OUTPUT_PRICE_PER_MILLION'] = '0.24'
 os.environ['USD_TO_JPY'] = '150'
 
 from enhanced_index import lambda_handler
@@ -21,7 +21,7 @@ test_event = {
 
 if __name__ == "__main__":
     try:
-        print("=== Enhanced Lambda Function Test ===")
+        print("=== Nova Lambda Function Test ===")
         print(f"Model: {os.environ.get('MODEL_ID')}")
         print(f"Article: cursor-2-0")
         print()
