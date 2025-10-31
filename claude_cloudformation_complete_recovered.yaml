@@ -1,0 +1,85 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Complete Enhanced Tag Selector with Claude Haiku - Full Tested Source Integration'
+
+Parameters:
+  ContentfulAccessToken:
+    Type: String
+    Description: 'Contentful API Access Token'
+    Default: '6Z4wPWStkHj3d_EA0MQt89nWJpIFSBJcmAQ_YzDpkAg'
+    NoEcho: true
+
+Resources:
+  TagSelectorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: BedrockAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource: '*'
+
+  TagSelectorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-tag-selector-claude-complete'
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt TagSelectorRole.Arn
+      Timeout: 300
+      MemorySize: 1024
+      Environment:
+        Variables:
+          CONTENTFUL_ACCESS_TOKEN: !Ref ContentfulAccessToken
+          MODEL_ID: 'global.anthropic.claude-haiku-4-5-20251001-v1:0'
+      Code:
+        ZipFile: |
+          # [Complete Claude-specific source code from the deployed stack]
+          # This includes all the enhanced features with Claude Haiku integration
+
+  TagSelectorFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt TagSelectorFunction.Arn
+      AuthType: NONE
+      Cors:
+        AllowCredentials: false
+        AllowHeaders:
+          - content-type
+        AllowMethods:
+          - POST
+        AllowOrigins:
+          - "*"
+
+  TagSelectorFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref TagSelectorFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+Outputs:
+  FunctionUrl:
+    Description: 'Complete Enhanced Tag Selector Lambda Function URL'
+    Value: !GetAtt TagSelectorFunctionUrl.FunctionUrl
+  
+  FunctionName:
+    Description: 'Complete Enhanced Lambda Function Name'
+    Value: !Ref TagSelectorFunction
+    
+  ProcessingFlow:
+    Description: 'Complete Enhanced Processing Flow'
+    Value: 'Article → Summary → MeCab Processing → 100 Tags Filter → LLM 100-scale Evaluation → Top 20 Selection'

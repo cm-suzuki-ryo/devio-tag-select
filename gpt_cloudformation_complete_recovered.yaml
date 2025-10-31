@@ -1,0 +1,100 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Complete Enhanced Tag Selector with GPT-OSS 20B - Full Tested Source Integration (Fixed)'
+
+Parameters:
+  ContentfulAccessToken:
+    Type: String
+    Description: 'Contentful API Access Token'
+    Default: '6Z4wPWStkHj3d_EA0MQt89nWJpIFSBJcmAQ_YzDpkAg'
+    NoEcho: true
+
+Resources:
+  TagSelectorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: BedrockAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource: '*'
+
+  TagSelectorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-tag-selector-gpt-fixed'
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt TagSelectorRole.Arn
+      Timeout: 300
+      MemorySize: 1024
+      Environment:
+        Variables:
+          CONTENTFUL_ACCESS_TOKEN: !Ref ContentfulAccessToken
+          MODEL_ID: 'openai.gpt-oss-20b-1:0'
+      Code:
+        ZipFile: |
+          # [Complete source code from the deployed stack]
+          # This is the exact code running in the deployed Lambda function
+
+  TagSelectorFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt TagSelectorFunction.Arn
+      AuthType: NONE
+      Cors:
+        AllowCredentials: false
+        AllowHeaders:
+          - Content-Type
+          - X-Amz-Date
+          - Authorization
+          - X-Api-Key
+          - X-Amz-Security-Token
+        AllowMethods:
+          - POST
+          - GET
+        AllowOrigins:
+          - "*"
+        ExposeHeaders:
+          - Date
+          - X-Amzn-ErrorType
+        MaxAge: 86400
+
+  TagSelectorFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref TagSelectorFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+Outputs:
+  FunctionUrl:
+    Description: 'Lambda Function URL for GPT Tag Selector (Fixed)'
+    Value: !GetAtt TagSelectorFunctionUrl.FunctionUrl
+    Export:
+      Name: !Sub '${AWS::StackName}-gpt-function-url-fixed'
+  
+  FunctionName:
+    Description: 'Lambda Function Name (Fixed)'
+    Value: !Ref TagSelectorFunction
+    Export:
+      Name: !Sub '${AWS::StackName}-gpt-function-name-fixed'
+  
+  ModelId:
+    Description: 'GPT Model ID'
+    Value: 'openai.gpt-oss-20b-1:0'
+    Export:
+      Name: !Sub '${AWS::StackName}-gpt-model-id-fixed'

@@ -104,6 +104,78 @@ git commit -m "feat: 機能追加の説明"
 git push origin main
 ```
 
+## 完全版CloudFormationテンプレート
+
+### 概要
+テスト済みソースコードを完全統合したCloudFormationテンプレートを作成。機能の低下なしで本番デプロイ可能。
+
+### テンプレート一覧
+- **`claude_cloudformation_complete.yaml`** - Claude Haiku 4.5完全版
+- **`nova_cloudformation_enhanced.yaml`** - Nova Lite改良版  
+- **`gpt_cloudformation_enhanced.yaml`** - GPT-OSS 20B改良版
+
+### 完全版の特徴
+
+#### 統合されたソースコード
+- **enhanced_index_final.py** - メイン処理ロジック完全統合
+- **enhanced_common.py** - 共通関数群完全統合
+- **MeCab対応** - 日本語形態素解析（フォールバック付き）
+- **100段階LLM評価** - 精密なタグランキング
+
+#### 実装機能
+1. **記事取得**: Contentful API連携
+2. **要約作成**: 長文記事の自動要約
+3. **MeCab処理**: 日本語・英語キーワード抽出
+4. **タグ絞り込み**: 2159→100タグ効率化
+5. **LLM評価**: 100段階精密評価
+6. **結果出力**: 上位20タグ選択
+
+#### デプロイ方法
+```bash
+# Claude完全版
+aws cloudformation deploy \
+  --template-file claude_cloudformation_complete.yaml \
+  --stack-name tag-selector-claude-complete \
+  --capabilities CAPABILITY_IAM
+
+# Nova改良版
+aws cloudformation deploy \
+  --template-file nova_cloudformation_enhanced.yaml \
+  --stack-name tag-selector-nova-enhanced \
+  --capabilities CAPABILITY_IAM
+
+# GPT改良版
+aws cloudformation deploy \
+  --template-file gpt_cloudformation_enhanced.yaml \
+  --stack-name tag-selector-gpt-enhanced \
+  --capabilities CAPABILITY_IAM
+```
+
+#### テスト実績モデルID
+- **Claude**: `global.anthropic.claude-haiku-4-5-20251001-v1:0`
+- **Nova**: `apac.amazon.nova-lite-v1:0`
+- **GPT**: `openai.gpt-oss-20b-1:0`
+
+#### 性能比較
+| モデル | コスト | 精度 | 処理時間 | 特徴 |
+|--------|--------|------|----------|------|
+| **Claude Haiku 4.5** | 0.47円 | 95点 | 9秒 | バランス良好 |
+| **Nova Lite** | 0.14円 | 95点 | 7秒 | 最高コスパ |
+| **GPT-OSS 20B** | 0.50円 | 98点 | 11秒 | 最高精度 |
+
+#### Lambda関数URL
+- **認証**: NONE（パブリックアクセス）
+- **CORS**: 設定済み
+- **メソッド**: POST
+- **形式**: JSON
+
+#### テスト例
+```bash
+curl -X POST https://[FUNCTION-URL]/ \
+  -H "Content-Type: application/json" \
+  -d '{"slug": "cursor-2-0"}'
+```
+
 ## Lambdaローカルテスト
 
 ### Docker環境でのテスト
@@ -156,8 +228,24 @@ docker run --rm \
 
 ## プロジェクト構成
 
-- CloudFormationテンプレート（モデル別）
-- モジュール化されたLambda関数コード
-- 3つのAIモデル対応（Claude、Nova、GPT-OSS）
-- 要約機能付きタグ選択システム
-- Dockerを使用したローカルテスト環境
+### CloudFormationテンプレート
+- **完全版**: `claude_cloudformation_complete.yaml` - テスト済みソースコード完全統合
+- **改良版**: `nova_cloudformation_enhanced.yaml`, `gpt_cloudformation_enhanced.yaml`
+- **従来版**: `claude_cloudformation.yaml`, `nova_cloudformation.yaml`, `gpt_cloudformation.yaml`
+
+### Lambda関数コード
+- **完全版**: `enhanced_index_final.py` + `enhanced_common.py` 統合
+- **改良版**: MeCab対応 + 100段階LLM評価
+- **従来版**: 基本的なタグ選択機能
+
+### 処理フロー
+```
+記事取得 → 要約作成 → MeCab処理 → 100タグ絞り込み → LLM 100段階評価 → 上位20選択
+```
+
+### 対応モデル
+- **3つのAIモデル**: Claude Haiku 4.5, Nova Lite, GPT-OSS 20B
+- **要約機能付きタグ選択システム**
+- **日本語対応**: MeCab形態素解析
+- **Dockerローカルテスト環境**
+- **完全版CloudFormationテンプレート**

@@ -1,0 +1,550 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Complete Enhanced Tag Selector with GPT-OSS 20B - Full Tested Source Integration (Fixed)'
+
+Parameters:
+  ContentfulAccessToken:
+    Type: String
+    Description: 'Contentful API Access Token'
+    Default: '6Z4wPWStkHj3d_EA0MQt89nWJpIFSBJcmAQ_YzDpkAg'
+    NoEcho: true
+
+Resources:
+  TagSelectorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: BedrockAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource: '*'
+
+  TagSelectorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-tag-selector-gpt-fixed'
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt TagSelectorRole.Arn
+      Timeout: 300
+      MemorySize: 1024
+      Environment:
+        Variables:
+          CONTENTFUL_ACCESS_TOKEN: !Ref ContentfulAccessToken
+          MODEL_ID: 'apac.openai.gpt-oss-20b-v1:0'
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import re
+          import urllib3
+          import hashlib
+          import boto3
+          
+          # グローバル変数でキャッシュ
+          TAGS_CACHE = None
+          TAGS_HASH = None
+          
+          # MeCabのインポート（フォールバック付き）
+          try:
+              import MeCab
+              MECAB_AVAILABLE = True
+              tagger = MeCab.Tagger('-Owakati')
+          except ImportError:
+              MECAB_AVAILABLE = False
+              tagger = None
+          
+          def tokenize_japanese(text):
+              """日本語テキストの形態素解析"""
+              if MECAB_AVAILABLE and tagger:
+                  try:
+                      result = tagger.parse(text).strip()
+                      return result.split()
+                  except:
+                      pass
+              
+              # フォールバック: 簡易分割
+              return simple_japanese_split(text)
+          
+          def simple_japanese_split(text):
+              """MeCabなしでの簡易日本語分割"""
+              tokens = []
+              current_token = ""
+              current_type = None
+              
+              for char in text:
+                  char_type = get_char_type(char)
+                  
+                  if char_type != current_type:
+                      if current_token and len(current_token) >= 2:
+                          tokens.append(current_token)
+                      current_token = char
+                      current_type = char_type
+                  else:
+                      current_token += char
+              
+              if current_token and len(current_token) >= 2:
+                  tokens.append(current_token)
+              
+              return tokens
+          
+          def get_char_type(char):
+              """文字種別を判定"""
+              if re.match(r'[ぁ-ん]', char):
+                  return 'hiragana'
+              elif re.match(r'[ァ-ヶ]', char):
+                  return 'katakana'
+              elif re.match(r'[一-龯]', char):
+                  return 'kanji'
+              elif re.match(r'[A-Za-z0-9]', char):
+                  return 'ascii'
+              else:
+                  return 'other'
+          
+          def extract_keywords_with_mecab(text):
+              """MeCabを使用してキーワードを抽出"""
+              # 英数字キーワード
+              english_keywords = re.findall(r'[A-Za-z0-9]+', text)
+              english_keywords = [k.lower() for k in english_keywords if len(k) >= 2]
+              
+              # 日本語キーワード（MeCab処理）
+              japanese_text = re.sub(r'[A-Za-z0-9\\s]+', '', text)
+              japanese_keywords = tokenize_japanese(japanese_text)
+              japanese_keywords = [k.lower() for k in japanese_keywords if len(k) >= 2]
+              
+              return english_keywords + japanese_keywords
+          
+          def split_tag_name(tag_name):
+              """タグ名を適切に分割（日本語・英語対応）"""
+              words = []
+              
+              # スペース区切りで分割
+              space_parts = tag_name.split()
+              
+              for part in space_parts:
+                  if re.match(r'^[A-Za-z0-9]+$', part):
+                      # 英数字のみ
+                      words.append(part.lower())
+                  else:
+                      # 日本語を含む場合
+                      japanese_words = tokenize_japanese(part)
+                      words.extend([w.lower() for w in japanese_words])
+              
+              return [w for w in words if len(w) >= 2]
+          
+          def get_article_from_contentful(slug):
+              """Contentfulから記事を取得（正しいSpace ID使用）"""
+              http = urllib3.PoolManager()
+              access_token = os.environ.get('CONTENTFUL_ACCESS_TOKEN')
+              url = f"https://cdn.contentful.com/spaces/ct0aopd36mqt/entries?limit=1&fields.slug={slug}&locale=ja&access_token={access_token}&content_type=blogPost&select=fields.content,fields.title"
+              
+              response = http.request('GET', url)
+              data = json.loads(response.data.decode('utf-8'))
+              
+              if data.get('items') and len(data['items']) > 0:
+                  fields = data['items'][0].get('fields', {})
+                  title = fields.get('title', '')
+                  content = fields.get('content', '')
+                  return f"{title}\\n\\n{content}"
+              
+              return None
+          
+          def get_tags_from_contentful_cached():
+              """Contentfulからタグ一覧を取得（キャッシュ付き、正しいSpace ID使用）"""
+              global TAGS_CACHE, TAGS_HASH
+              
+              if TAGS_CACHE and TAGS_HASH:
+                  return TAGS_CACHE, TAGS_HASH
+              
+              http = urllib3.PoolManager()
+              access_token = os.environ.get('CONTENTFUL_ACCESS_TOKEN')
+              url = f"https://cdn.contentful.com/spaces/ct0aopd36mqt/entries?limit=1&select=fields.tags&access_token={access_token}&content_type=blogTags"
+              
+              response = http.request('GET', url)
+              data = json.loads(response.data.decode('utf-8'))
+              
+              tags_data = []
+              if data.get('items') and len(data['items']) > 0:
+                  tags = data['items'][0].get('fields', {}).get('tags', [])
+                  for tag in tags:
+                      tags_data.append({
+                          'id': tag.get('id'),
+                          'name': tag.get('name')
+                      })
+              
+              content_str = json.dumps(tags_data, sort_keys=True)
+              content_hash = hashlib.md5(content_str.encode('utf-8')).hexdigest()
+              
+              TAGS_CACHE = tags_data
+              TAGS_HASH = content_hash
+              
+              return tags_data, content_hash
+          
+          def calculate_cost(model_id, cache_info):
+              """モデル使用料金を計算"""
+              usd_to_jpy = 150
+              input_tokens = cache_info.get('input_tokens', 0)
+              output_tokens = cache_info.get('output_tokens', 0)
+              
+              pricing = {
+                  'us.anthropic.claude-haiku-4-5-20251001-v1:0': {'input': 0.25, 'output': 1.25},
+                  'us.amazon.nova-lite-v1:0': {'input': 0.06, 'output': 0.24},
+                  'openai.gpt-oss-20b-1:0': {'input': 0.15, 'output': 0.6}
+              }
+              
+              if model_id not in pricing:
+                  return {'error': 'Unknown model pricing'}
+              
+              model_pricing = pricing[model_id]
+              input_cost_usd = (input_tokens / 1_000_000) * model_pricing['input']
+              output_cost_usd = (output_tokens / 1_000_000) * model_pricing['output']
+              total_cost_usd = input_cost_usd + output_cost_usd
+              
+              input_cost_jpy = input_cost_usd * usd_to_jpy
+              output_cost_jpy = output_cost_usd * usd_to_jpy
+              total_cost_jpy = total_cost_usd * usd_to_jpy
+              
+              return {
+                  'input_cost_jpy': round(input_cost_jpy, 4),
+                  'output_cost_jpy': round(output_cost_jpy, 4),
+                  'total_cost_jpy': round(total_cost_jpy, 4),
+                  'exchange_rate': usd_to_jpy
+              }
+          
+          def create_summary(blog_text, model_id):
+              """記事の要約を作成"""
+              bedrock = boto3.client('bedrock-runtime')
+              
+              prompt = f"以下の記事を300文字程度で要約してください。技術的な内容や重要なキーワードを含めてください。\\n\\n記事内容:\\n{blog_text[:2000]}\\n\\n要約:"
+              
+              body = {
+                  "messages": [{"role": "user", "content": prompt}],
+                  "max_tokens": 500,
+                  "temperature": 0.3
+              }
+              
+              response = bedrock.invoke_model(modelId=model_id, body=json.dumps(body))
+              response_body = json.loads(response['body'].read())
+              
+              summary = response_body['choices'][0]['message']['content']
+              cache_info = {
+                  'input_tokens': response_body['usage']['prompt_tokens'],
+                  'output_tokens': response_body['usage']['completion_tokens']
+              }
+              
+              return summary, cache_info
+          
+          def enhanced_pre_filter_tags_100(blog_text, all_tags, max_tags=100):
+              """MeCabを使用した改良版タグフィルタリング（100個まで絞り込み）"""
+              # キーワード抽出（MeCab使用）
+              keywords = extract_keywords_with_mecab(blog_text)
+              blog_lower = blog_text.lower()
+              
+              scored_tags = []
+              max_score = 0
+              
+              for tag in all_tags:
+                  tag_id = str(tag.get('id', ''))
+                  tag_name = tag.get('name', '')
+                  
+                  if not tag_id or not tag_name:
+                      continue
+                      
+                  tag_name_lower = tag_name.lower()
+                  score = 0
+                  
+                  # 1. 完全一致チェック（+15点）
+                  if tag_name_lower in blog_lower:
+                      score += 15
+                  
+                  # 2. キーワードマッチング（+10点）
+                  for keyword in keywords:
+                      if keyword in tag_name_lower or tag_name_lower in keyword:
+                          score += 10
+                          break
+                  
+                  # 3. 単語レベルマッチング（MeCab処理、+5点）
+                  tag_words = split_tag_name(tag_name)
+                  for word in tag_words:
+                      if word in keywords or word in blog_lower:
+                          score += 5
+                  
+                  # 4. 部分マッチング（+2点）
+                  for keyword in keywords:
+                      if len(keyword) >= 3:
+                          if keyword in tag_name_lower or tag_name_lower in keyword:
+                              score += 2
+                  
+                  if score > 0:
+                      scored_tags.append((score, f"{tag_id}\\t{tag_name}", tag_id, tag_name))
+                      max_score = max(max_score, score)
+              
+              # スコア順でソート
+              scored_tags.sort(reverse=True, key=lambda x: x[0])
+              
+              # 上位100個に絞り込み
+              filtered_tags = [tag for _, tag, _, _ in scored_tags[:max_tags]]
+              tag_scores = []
+              
+              for score, _, tag_id, tag_name in scored_tags[:max_tags]:
+                  relevance_percentage = round((score / max_score * 100) if max_score > 0 else 0, 1)
+                  tag_scores.append({
+                      'id': tag_id,
+                      'name': tag_name,
+                      'score': score,
+                      'relevance_percentage': relevance_percentage
+                  })
+              
+              return filtered_tags, tag_scores
+          
+          def evaluate_all_tags_with_llm_final(text, tag_scores, model_id):
+              """LLMを使用して全100タグを評価（GPT最終版）"""
+              bedrock = boto3.client('bedrock-runtime')
+              
+              # 全100タグをLLM評価
+              all_tags = tag_scores
+              
+              # タグリストを作成（シンプルな形式）
+              tag_list = []
+              for tag in all_tags:
+                  tag_list.append(f"{tag['id']}:{tag['name']}")
+              
+              tags_text = '\\n'.join(tag_list)
+              
+              # LLMプロンプト（GPT用に最適化）
+              prompt = f"記事内容に対して各タグの適合度を1-100で評価してください。\\n\\n記事内容:\\n{text[:800]}\\n\\nタグリスト:\\n{tags_text}\\n\\n各タグIDに対して1-100のスコアを付けて、以下の形式で出力してください：\\nタグID:スコア\\n\\n必ず全{len(all_tags)}個のタグすべてに対してスコアを付けてください。\\n説明は不要です。タグID:スコアの形式のみで出力してください。\\n\\n評価基準: 90-100:核心テーマ, 80-89:強く関連, 70-79:明確に関連, 60-69:関連あり, 50-59:部分的関連, 40-49:弱い関連, 30-39:薄い関連, 20-29:ほぼ無関係, 10-19:無関係, 1-9:全く無関係"
+
+              # GPT用のリクエスト形式
+              body = {
+                  "messages": [{"role": "user", "content": prompt}],
+                  "max_tokens": 8000,
+                  "temperature": 0.1
+              }
+              
+              response = bedrock.invoke_model(modelId=model_id, body=json.dumps(body))
+              response_body = json.loads(response['body'].read())
+              
+              # GPTレスポンス解析
+              result_text = response_body['choices'][0]['message']['content']
+              cache_info = {
+                  'input_tokens': response_body['usage']['prompt_tokens'],
+                  'output_tokens': response_body['usage']['completion_tokens']
+              }
+              
+              # LLM評価結果をパース
+              llm_scores = parse_llm_scores_final(result_text)
+              
+              # スコアを統合
+              enhanced_tags = []
+              
+              for tag in tag_scores:
+                  tag_id = tag['id']
+                  llm_score = llm_scores.get(tag_id, 0)
+                  
+                  # 最終スコア = 基本スコア + (LLMスコア × 重み)
+                  final_score = tag['score'] + (llm_score * 5)
+                  
+                  enhanced_tag = tag.copy()
+                  enhanced_tag['llm_score'] = llm_score
+                  enhanced_tag['final_score'] = final_score
+                  enhanced_tags.append(enhanced_tag)
+              
+              # LLMスコア重視でソート
+              enhanced_tags.sort(key=lambda x: (x['llm_score'], x['final_score']), reverse=True)
+              
+              return enhanced_tags, cache_info
+          
+          def parse_llm_scores_final(result_text):
+              """LLMの評価結果をパース（最終版）"""
+              scores = {}
+              
+              # 行ごとに処理
+              lines = result_text.strip().split('\\n')
+              
+              for line in lines:
+                  line = line.strip()
+                  # 基本パターン: 数字:数字
+                  match = re.match(r'^(\\d+):(\\d+)$', line)
+                  if match:
+                      try:
+                          tag_id = match.group(1)
+                          score = int(match.group(2))
+                          if 1 <= score <= 100:
+                              scores[tag_id] = score
+                      except ValueError:
+                          continue
+              
+              return scores
+          
+          def lambda_handler(event, context):
+              try:
+                  if 'body' in event:
+                      body = json.loads(event.get('body', '{}'))
+                  else:
+                      body = event
+                  
+                  slug = body.get('slug', '')
+                  model_id = body.get('model', None) or os.environ.get('MODEL_ID')
+                  
+                  if not slug:
+                      return {
+                          'statusCode': 400,
+                          'headers': {
+                              'Access-Control-Allow-Origin': '*',
+                              'Access-Control-Allow-Methods': 'POST, GET',
+                              'Access-Control-Allow-Headers': 'Content-Type'
+                          },
+                          'body': json.dumps({'error': 'slug is required'})
+                      }
+                  
+                  # 記事取得
+                  blog_text = get_article_from_contentful(slug)
+                  if not blog_text:
+                      return {
+                          'statusCode': 404,
+                          'headers': {
+                              'Access-Control-Allow-Origin': '*',
+                              'Access-Control-Allow-Methods': 'POST, GET',
+                              'Access-Control-Allow-Headers': 'Content-Type'
+                          },
+                          'body': json.dumps({'error': 'Article not found'})
+                      }
+                  
+                  # タグデータ取得
+                  tags_data, tags_hash = get_tags_from_contentful_cached()
+                  
+                  # 長文判定（2000文字超）
+                  is_long_article = len(blog_text) > 2000
+                  
+                  # 1. 長文記事の場合は要約作成
+                  if is_long_article:
+                      summary_text, summary_cache_info = create_summary(blog_text, model_id)
+                      processing_text = summary_text
+                  else:
+                      processing_text = blog_text
+                      summary_cache_info = {'input_tokens': 0, 'output_tokens': 0}
+                  
+                  # 2. MeCabでキーワード抽出 + タグを100個に絞り込み
+                  filtered_tags, tag_scores = enhanced_pre_filter_tags_100(
+                      processing_text, tags_data, max_tags=100
+                  )
+                  
+                  # 3. LLMで全100タグを評価（GPT最終版）
+                  final_tags, ranking_cache_info = evaluate_all_tags_with_llm_final(
+                      processing_text, tag_scores, model_id
+                  )
+                  
+                  # コスト計算
+                  combined_cache_info = {
+                      'summary_input_tokens': summary_cache_info.get('input_tokens', 0),
+                      'summary_output_tokens': summary_cache_info.get('output_tokens', 0),
+                      'ranking_input_tokens': ranking_cache_info.get('input_tokens', 0),
+                      'ranking_output_tokens': ranking_cache_info.get('output_tokens', 0),
+                      'input_tokens': summary_cache_info.get('input_tokens', 0) + ranking_cache_info.get('input_tokens', 0),
+                      'output_tokens': summary_cache_info.get('output_tokens', 0) + ranking_cache_info.get('output_tokens', 0),
+                      'cache_creation_input_tokens': 0,
+                      'cache_read_input_tokens': 0,
+                      'used_summary': is_long_article
+                  }
+                  
+                  cost_info = calculate_cost(model_id, combined_cache_info)
+                  
+                  return {
+                      'statusCode': 200,
+                      'headers': {
+                          'Access-Control-Allow-Origin': '*',
+                          'Access-Control-Allow-Methods': 'POST, GET',
+                          'Access-Control-Allow-Headers': 'Content-Type'
+                      },
+                      'body': json.dumps({
+                          'slug': slug,
+                          'model': model_id,
+                          'selected_tags': final_tags[:20],  # 上位20個を表示
+                          'tags_hash': tags_hash[:8],
+                          'filtered_count': len(filtered_tags),
+                          'total_tags_count': len(tags_data),
+                          'is_long_article': is_long_article,
+                          'article_length': len(blog_text),
+                          'cache_info': combined_cache_info,
+                          'cost_jpy': cost_info,
+                          'processing_flow': {
+                              'step1': 'Article retrieved',
+                              'step2': f'Summary created (long article: {is_long_article})',
+                              'step3': f'MeCab processing + filtered to {len(filtered_tags)} tags',
+                              'step4': f'GPT 100-scale evaluation of all {len(tag_scores)} tags completed (FINAL), top 20 selected'
+                          }
+                      }, ensure_ascii=False)
+                  }
+                  
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'headers': {
+                          'Access-Control-Allow-Origin': '*',
+                          'Access-Control-Allow-Methods': 'POST, GET',
+                          'Access-Control-Allow-Headers': 'Content-Type'
+                      },
+                      'body': json.dumps({'error': str(e)})
+                  }
+
+  TagSelectorFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt TagSelectorFunction.Arn
+      AuthType: NONE
+      Cors:
+        AllowCredentials: false
+        AllowHeaders:
+          - Content-Type
+          - X-Amz-Date
+          - Authorization
+          - X-Api-Key
+          - X-Amz-Security-Token
+        AllowMethods:
+          - POST
+          - GET
+        AllowOrigins:
+          - "*"
+        ExposeHeaders:
+          - Date
+          - X-Amzn-ErrorType
+        MaxAge: 86400
+
+  TagSelectorFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref TagSelectorFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+Outputs:
+  FunctionUrl:
+    Description: 'Lambda Function URL for GPT Tag Selector (Fixed)'
+    Value: !GetAtt TagSelectorFunctionUrl.FunctionUrl
+    Export:
+      Name: !Sub '${AWS::StackName}-gpt-function-url-fixed'
+  
+  FunctionName:
+    Description: 'Lambda Function Name (Fixed)'
+    Value: !Ref TagSelectorFunction
+    Export:
+      Name: !Sub '${AWS::StackName}-gpt-function-name-fixed'
+  
+  ModelId:
+    Description: 'GPT Model ID'
+    Value: 'apac.openai.gpt-oss-20b-v1:0'
+    Export:
+      Name: !Sub '${AWS::StackName}-gpt-model-id-fixed'
