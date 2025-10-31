@@ -142,8 +142,9 @@ Resources:
               # SSH key setup for git
               - sudo -u ec2-user mkdir -p /home/ec2-user/.ssh
               - sudo -u ec2-user chmod 700 /home/ec2-user/.ssh
-              - sudo -u ec2-user aws secretsmanager get-secret-value --secret-id "arn:aws:secretsmanager:ap-northeast-1:784693731708:secret:git-cm-suzuki-ryo-XBTk0O" --region ap-northeast-1 | jq -r .SecretBinary | base64 --decode > /home/ec2-user/.ssh/id_rsa_git
-              - sudo -u ec2-user chmod 600 /home/ec2-user/.ssh/id_rsa_git
+              - aws secretsmanager get-secret-value --secret-id "arn:aws:secretsmanager:ap-northeast-1:784693731708:secret:git-cm-suzuki-ryo-XBTk0O" --region ap-northeast-1 | jq -r .SecretBinary | base64 --decode > /home/ec2-user/.ssh/id_rsa_git
+              - chown ec2-user:ec2-user /home/ec2-user/.ssh/id_rsa_git
+              - chmod 600 /home/ec2-user/.ssh/id_rsa_git
               - sudo -u ec2-user ssh-keyscan -H github.com >> /home/ec2-user/.ssh/known_hosts
               - echo -e "Host github.com\n  StrictHostKeyChecking no\n  UserKnownHostsFile=/dev/null" > /home/ec2-user/.ssh/config
               - chown ec2-user:ec2-user /home/ec2-user/.ssh/config
