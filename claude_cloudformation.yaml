@@ -55,6 +55,7 @@ Resources:
           import urllib3
           import hashlib
           import boto3
+          import time
           
           # グローバル変数でキャッシュ
           TAGS_CACHE = None
@@ -165,12 +166,26 @@ Resources:
               return None
           
           def get_tags_from_contentful_cached():
-              """Contentfulからタグ一覧を取得（キャッシュ付き）"""
+              """Contentfulからタグ一覧を取得（ファイルキャッシュ付き）"""
               global TAGS_CACHE, TAGS_HASH
               
+              # メモリキャッシュをチェック
               if TAGS_CACHE and TAGS_HASH:
                   return TAGS_CACHE, TAGS_HASH
               
+              # ファイルキャッシュをチェック
+              cache_file = '/tmp/contentful_tags_cache.json'
+              if os.path.exists(cache_file):
+                  try:
+                      with open(cache_file, 'r', encoding='utf-8') as f:
+                          cache_data = json.load(f)
+                          TAGS_CACHE = cache_data['tags_data']
+                          TAGS_HASH = cache_data['tags_hash']
+                          return TAGS_CACHE, TAGS_HASH
+                  except Exception:
+                      pass  # ファイル読み込みエラー時はAPI取得へ
+              
+              # Contentful APIから取得
               http = urllib3.PoolManager()
               access_token = os.environ.get('CONTENTFUL_ACCESS_TOKEN')
               url = f"https://cdn.contentful.com/spaces/ct0aopd36mqt/entries?limit=1&select=fields.tags&access_token={access_token}&content_type=blogTags"
@@ -187,11 +202,25 @@ Resources:
                           'name': tag.get('name')
                       })
               
+              # ハッシュ生成
               content_str = json.dumps(tags_data, sort_keys=True)
               content_hash = hashlib.md5(content_str.encode('utf-8')).hexdigest()
               
+              # メモリキャッシュに保存
               TAGS_CACHE = tags_data
               TAGS_HASH = content_hash
+              
+              # ファイルキャッシュに保存
+              try:
+                  cache_data = {
+                      'tags_data': tags_data,
+                      'tags_hash': content_hash,
+                      'timestamp': time.time()
+                  }
+                  with open(cache_file, 'w', encoding='utf-8') as f:
+                      json.dump(cache_data, f, ensure_ascii=False)
+              except Exception:
+                  pass  # 保存エラーは無視
               
               return tags_data, content_hash
           
