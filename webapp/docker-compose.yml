@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  webapp:
+    build: .
+    ports:
+      - "0.0.0.0:3000:3000"
+    volumes:
+      - .:/app
+      - /app/node_modules
+    environment:
+      - LAMBDA_URL=https://fumsphmmxktt4afevrre332fvu0hfdal.lambda-url.us-west-2.on.aws/
+      - HOSTNAME=0.0.0.0

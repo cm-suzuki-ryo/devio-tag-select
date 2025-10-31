@@ -1,0 +1,14 @@
+name = "tag-selector"
+main = "index.js"
+compatibility_date = "2024-10-31"
+
+# Cloudflare Access (Zero Trust) 設定
+# Cloudflare Dashboardで設定後、ここに記載
+# [env.production]
+# routes = [
+#   { pattern = "tag-selector.yourdomain.com", zone_name = "yourdomain.com" }
+# ]
+
+[env.production]
+name = "tag-selector"
+
