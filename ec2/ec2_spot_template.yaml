@@ -149,6 +149,9 @@ Resources:
               - echo -e "Host github.com\n  StrictHostKeyChecking no\n  UserKnownHostsFile=/dev/null" > /home/ec2-user/.ssh/config
               - chown ec2-user:ec2-user /home/ec2-user/.ssh/config
               - chmod 600 /home/ec2-user/.ssh/config
+              # Git configuration
+              - sudo -u ec2-user git config --global user.name "suzuki.ryo"
+              - sudo -u ec2-user git config --global user.email "suzuki.ryo@classmethod.jp"
 
 # --------------------------------------------- #
 # Spot Fleet Request

@@ -1,0 +1,22 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# 必要なパッケージをインストール
+RUN apt-get update && apt-get install -y \
+    mecab \
+    libmecab-dev \
+    mecab-ipadic-utf8 \
+    && rm -rf /var/lib/apt/lists/*
+
+# MeCab設定ファイルを作成
+RUN echo "dicdir = /var/lib/mecab/dic/ipadic-utf8" > /etc/mecabrc
+
+# Pythonパッケージをインストール
+RUN pip install mecab-python3
+
+# ソースファイルをコピー
+COPY lambda-code/enhanced_common.py .
+COPY tests/test_mecab_debug.py .
+
+CMD ["python3", "test_mecab_debug.py"]

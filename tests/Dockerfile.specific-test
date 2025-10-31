@@ -1,0 +1,27 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# MeCab installation
+RUN apt-get update && apt-get install -y \
+    mecab \
+    libmecab-dev \
+    mecab-ipadic-utf8 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN echo "dicdir = /var/lib/mecab/dic/ipadic-utf8" > /etc/mecabrc
+
+COPY lambda-code/requirements.txt .
+RUN pip install -r requirements.txt
+RUN pip install mecab-python3 boto3 urllib3
+
+COPY lambda-code/enhanced_index.py .
+COPY lambda-code/enhanced_common.py .
+COPY lambda-code/common.py .
+COPY lambda-code/model_router.py .
+COPY lambda-code/claude_model.py .
+COPY lambda-code/nova_model.py .
+COPY lambda-code/gpt_model.py .
+COPY tests/test_specific_slug.py .
+
+CMD ["python", "test_specific_slug.py"]

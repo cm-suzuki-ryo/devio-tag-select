@@ -39,6 +39,7 @@ def create_summary_with_claude(blog_text, model_id):
     body = {
         "anthropic_version": "bedrock-2023-05-31",
         "max_tokens": 8192,
+        "system": [{"type": "text", "text": "あなたは記事要約の専門家です。"}],
         "messages": [{
             "role": "user",
             "content": f"以下のブログ記事を1000文字程度で要約してください。技術的なキーワードや重要な概念は必ず含めてください：\n\n{blog_text}"

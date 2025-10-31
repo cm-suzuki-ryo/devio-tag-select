@@ -35,7 +35,7 @@ def create_summary_with_nova(blog_text, model_id):
     """Novaモデルで記事要約を作成"""
     bedrock = boto3.client('bedrock-runtime')
     
-    prompt = f"以下のブログ記事を1000文字程度で要約してください。技術的なキーワードや重要な概念は必ず含めてください：\n\n{blog_text}"
+    prompt = f"あなたは記事要約の専門家です。以下のブログ記事を1000文字程度で要約してください。技術的なキーワードや重要な概念は必ず含めてください：\n\n{blog_text}"
     
     body = {
         "messages": [{"role": "user", "content": [{"text": prompt}]}],
