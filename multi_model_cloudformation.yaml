@@ -1,0 +1,1013 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Tag Selector with Multiple Model-Specific Lambda Functions'
+
+Parameters:
+  ContentfulAccessToken:
+    Type: String
+    Description: 'Contentful API Access Token'
+    Default: '6Z4wPWStkHj3d_EA0MQt89nWJpIFSBJcmAQ_YzDpkAg'
+    NoEcho: true
+
+Resources:
+  # IAM Role for Lambda
+  TagSelectorLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: BedrockInvokePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource: 
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0'
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/us.amazon.nova-lite-v1:0'
+                  - 'arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0'
+                  - 'arn:aws:bedrock:*::foundation-model/openai.gpt-oss-20b-1:0'
+                  - 'arn:aws:bedrock:*::foundation-model/amazon.nova-lite-v1:0'
+              - Effect: Allow
+                Action:
+                  - aws-marketplace:ViewSubscriptions
+                  - aws-marketplace:Subscribe
+                Resource: '*'
+
+  # Claude Lambda Function
+  ClaudeTagSelectorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: tag-selector-claude
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt TagSelectorLambdaRole.Arn
+      Timeout: 90
+      MemorySize: 1024
+      Environment:
+        Variables:
+          CONTENTFUL_ACCESS_TOKEN: !Ref ContentfulAccessToken
+          MODEL_ID: 'us.anthropic.claude-haiku-4-5-20251001-v1:0'
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import hashlib
+          import urllib3
+          import os
+          import re
+
+          # グローバル変数でキャッシュ
+          TAGS_CACHE = None
+          TAGS_HASH = None
+
+          def lambda_handler(event, context):
+              try:
+                  if 'body' in event:
+                      body = json.loads(event.get('body', '{}'))
+                  else:
+                      body = event
+                  
+                  slug = body.get('slug', '')
+                  model_id = os.environ.get('MODEL_ID')
+                  
+                  if not slug:
+                      return {
+                          'statusCode': 400,
+                          'body': json.dumps({'error': 'slug is required'})
+                      }
+                  
+                  blog_text = get_article_from_contentful(slug)
+                  if not blog_text:
+                      return {
+                          'statusCode': 404,
+                          'body': json.dumps({'error': 'Article not found'})
+                      }
+                  
+                  tags_data, tags_hash = get_tags_from_contentful_cached()
+                  filtered_tags = pre_filter_tags(blog_text, tags_data, max_tags=100)
+                  
+                  # 文字数チェック
+                  is_long_article = len(blog_text) > 2000
+                  
+                  selected_tags, cache_info = process_article_with_model(
+                      blog_text, filtered_tags, tags_hash, model_id, is_long_article
+                  )
+                  cost_info = calculate_cost(model_id, cache_info)
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'slug': slug,
+                          'model': model_id,
+                          'selected_tags': selected_tags,
+                          'tags_hash': tags_hash[:8],
+                          'filtered_count': len(filtered_tags),
+                          'total_tags_count': len(tags_data),
+                          'is_long_article': is_long_article,
+                          'article_length': len(blog_text),
+                          'cache_info': cache_info,
+                          'cost_jpy': cost_info
+                      }, ensure_ascii=False)
+                  }
+                  
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({'error': str(e)})
+                  }
+
+          def process_article_with_model(blog_text, filtered_tags, tags_hash, model_id, is_long_article):
+              if is_long_article:
+                  summary_text, summary_cache_info = create_summary(blog_text, model_id)
+                  selected_tags, tag_cache_info = select_tags_with_model(
+                      summary_text, filtered_tags, tags_hash, model_id
+                  )
+                  
+                  combined_cache_info = {
+                      'summary_input_tokens': summary_cache_info.get('input_tokens', 0),
+                      'summary_output_tokens': summary_cache_info.get('output_tokens', 0),
+                      'tag_input_tokens': tag_cache_info.get('input_tokens', 0),
+                      'tag_output_tokens': tag_cache_info.get('output_tokens', 0),
+                      'input_tokens': summary_cache_info.get('input_tokens', 0) + tag_cache_info.get('input_tokens', 0),
+                      'output_tokens': summary_cache_info.get('output_tokens', 0) + tag_cache_info.get('output_tokens', 0),
+                      'cache_creation_input_tokens': tag_cache_info.get('cache_creation_input_tokens', 0),
+                      'cache_read_input_tokens': tag_cache_info.get('cache_read_input_tokens', 0),
+                      'used_summary': True
+                  }
+                  
+                  return selected_tags, combined_cache_info
+              else:
+                  selected_tags, cache_info = select_tags_with_model(
+                      blog_text, filtered_tags, tags_hash, model_id
+                  )
+                  cache_info['used_summary'] = False
+                  return selected_tags, cache_info
+
+          def create_summary(blog_text, model_id):
+              bedrock = boto3.client('bedrock-runtime')
+              
+              body = {
+                  "anthropic_version": "bedrock-2023-05-31",
+                  "max_tokens": 8192,
+                  "messages": [{
+                      "role": "user",
+                      "content": f"以下のブログ記事を1000文字程度で要約してください。技術的なキーワードや重要な概念は必ず含めてください：\n\n{blog_text}"
+                  }]
+              }
+              
+              response = bedrock.invoke_model(modelId=model_id, body=json.dumps(body))
+              response_body = json.loads(response['body'].read())
+              
+              summary_text = response_body['content'][0]['text']
+              usage = response_body.get('usage', {})
+              
+              cache_info = {
+                  'input_tokens': usage.get('input_tokens', 0),
+                  'output_tokens': usage.get('output_tokens', 0)
+              }
+              
+              return summary_text, cache_info
+
+          def select_tags_with_model(blog_text, filtered_tags, tags_hash, model_id):
+              bedrock = boto3.client('bedrock-runtime')
+              tags_text = '\n'.join(filtered_tags)
+              
+              system_text = f"あなたはブログ記事の内容分析とタグ付けの専門家です。タグデータハッシュ: {tags_hash} 以下のタグリストから、ブログ記事に最も関連するタグを最大5個選択してください： {tags_text} 選択基準：1.記事の主要テーマとの関連性 2.技術的内容との一致度 3.読者にとっての有用性 回答は必ずこのJSON形式で出力してください: {{\"tags\": [{{\"id\": \"123\", \"name\": \"タグ名\"}}]}}"
+              
+              body = {
+                  "anthropic_version": "bedrock-2023-05-31",
+                  "max_tokens": 8192,
+                  "system": [{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}],
+                  "messages": [{"role": "user", "content": f"以下のブログ記事を分析して適切なタグを選択してください：\n\n{blog_text}"}]
+              }
+              
+              response = bedrock.invoke_model(modelId=model_id, body=json.dumps(body))
+              response_body = json.loads(response['body'].read())
+              
+              result_text = response_body['content'][0]['text']
+              usage = response_body.get('usage', {})
+              
+              cache_info = {
+                  'cache_creation_input_tokens': usage.get('cache_creation_input_tokens', 0),
+                  'cache_read_input_tokens': usage.get('cache_read_input_tokens', 0),
+                  'input_tokens': usage.get('input_tokens', 0),
+                  'output_tokens': usage.get('output_tokens', 0)
+              }
+              
+              tags = extract_tags_from_response(result_text, model_id)
+              return tags, cache_info
+
+          def extract_tags_from_response(result_text, model_id):
+              try:
+                  start = result_text.find('{')
+                  end = result_text.rfind('}') + 1
+                  if start >= 0 and end > start:
+                      json_str = result_text[start:end]
+                      tags = json.loads(json_str)['tags']
+                      return tags if tags else []
+              except Exception as e:
+                  pass
+              return []
+
+          def calculate_cost(model_id, cache_info):
+              usd_to_jpy = 150
+              input_tokens = cache_info.get('input_tokens', 0)
+              output_tokens = cache_info.get('output_tokens', 0)
+              
+              pricing = {'us.anthropic.claude-haiku-4-5-20251001-v1:0': {'input': 0.25, 'output': 1.25}}
+              
+              if model_id not in pricing:
+                  return {'error': 'Unknown model pricing'}
+              
+              model_pricing = pricing[model_id]
+              input_cost_usd = (input_tokens / 1_000_000) * model_pricing['input']
+              output_cost_usd = (output_tokens / 1_000_000) * model_pricing['output']
+              total_cost_usd = input_cost_usd + output_cost_usd
+              
+              input_cost_jpy = input_cost_usd * usd_to_jpy
+              output_cost_jpy = output_cost_usd * usd_to_jpy
+              total_cost_jpy = total_cost_usd * usd_to_jpy
+              
+              result = {
+                  'input_cost_jpy': round(input_cost_jpy, 4),
+                  'output_cost_jpy': round(output_cost_jpy, 4),
+                  'total_cost_jpy': round(total_cost_jpy, 4),
+                  'exchange_rate': usd_to_jpy
+              }
+              
+              if cache_info.get('used_summary'):
+                  summary_input = cache_info.get('summary_input_tokens', 0)
+                  summary_output = cache_info.get('summary_output_tokens', 0)
+                  tag_input = cache_info.get('tag_input_tokens', 0)
+                  tag_output = cache_info.get('tag_output_tokens', 0)
+                  
+                  haiku_pricing = pricing['us.anthropic.claude-haiku-4-5-20251001-v1:0']
+                  summary_cost_usd = (summary_input / 1_000_000) * haiku_pricing['input'] + (summary_output / 1_000_000) * haiku_pricing['output']
+                  tag_cost_usd = (tag_input / 1_000_000) * model_pricing['input'] + (tag_output / 1_000_000) * model_pricing['output']
+                  
+                  result['summary_cost_jpy'] = round(summary_cost_usd * usd_to_jpy, 4)
+                  result['tag_selection_cost_jpy'] = round(tag_cost_usd * usd_to_jpy, 4)
+              
+              return result
+
+          def get_article_from_contentful(slug):
+              http = urllib3.PoolManager()
+              access_token = os.environ.get('CONTENTFUL_ACCESS_TOKEN')
+              url = f"https://cdn.contentful.com/spaces/ct0aopd36mqt/entries?limit=1&fields.slug={slug}&locale=ja&access_token={access_token}&content_type=blogPost&select=fields.content,fields.title"
+              
+              response = http.request('GET', url)
+              data = json.loads(response.data.decode('utf-8'))
+              
+              if data.get('items') and len(data['items']) > 0:
+                  fields = data['items'][0].get('fields', {})
+                  title = fields.get('title', '')
+                  content = fields.get('content', '')
+                  return f"{title}\n\n{content}"
+              
+              return None
+
+          def get_tags_from_contentful_cached():
+              global TAGS_CACHE, TAGS_HASH
+              
+              if TAGS_CACHE and TAGS_HASH:
+                  return TAGS_CACHE, TAGS_HASH
+              
+              http = urllib3.PoolManager()
+              access_token = os.environ.get('CONTENTFUL_ACCESS_TOKEN')
+              url = f"https://cdn.contentful.com/spaces/ct0aopd36mqt/entries?limit=1&select=fields.tags&access_token={access_token}&content_type=blogTags"
+              
+              response = http.request('GET', url)
+              data = json.loads(response.data.decode('utf-8'))
+              
+              tags_data = []
+              if data.get('items') and len(data['items']) > 0:
+                  tags = data['items'][0].get('fields', {}).get('tags', [])
+                  for tag in tags:
+                      tags_data.append({
+                          'id': tag.get('id'),
+                          'name': tag.get('name')
+                      })
+              
+              content_str = json.dumps(tags_data, sort_keys=True)
+              content_hash = hashlib.md5(content_str.encode('utf-8')).hexdigest()
+              
+              TAGS_CACHE = tags_data
+              TAGS_HASH = content_hash
+              
+              return tags_data, content_hash
+
+          def pre_filter_tags(blog_text, all_tags, max_tags=100):
+              blog_lower = blog_text.lower()
+              keywords = re.findall(r'[A-Za-z0-9]+|[ぁ-んァ-ヶ一-龯]+', blog_text)
+              keywords = [k.lower() for k in keywords if len(k) >= 2]
+              
+              scored_tags = []
+              for tag in all_tags:
+                  tag_id = str(tag.get('id', ''))
+                  tag_name = tag.get('name', '')
+                  
+                  if not tag_id or not tag_name:
+                      continue
+                      
+                  tag_name_lower = tag_name.lower()
+                  
+                  score = 0
+                  if tag_name_lower in blog_lower:
+                      score += 10
+                  
+                  for keyword in keywords:
+                      if keyword in tag_name_lower or tag_name_lower in keyword:
+                          score += 5
+                  
+                  for word in tag_name_lower.split():
+                      if len(word) >= 2 and word in blog_lower:
+                          score += 2
+                  
+                  if score > 0:
+                      scored_tags.append((score, f"{tag_id}\t{tag_name}"))
+              
+  # Nova Lambda Function
+  NovaTagSelectorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: tag-selector-nova
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt TagSelectorLambdaRole.Arn
+      Timeout: 90
+      MemorySize: 1024
+      Environment:
+        Variables:
+          CONTENTFUL_ACCESS_TOKEN: !Ref ContentfulAccessToken
+          MODEL_ID: 'us.amazon.nova-lite-v1:0'
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import hashlib
+          import urllib3
+          import os
+          import re
+
+          # グローバル変数でキャッシュ
+          TAGS_CACHE = None
+          TAGS_HASH = None
+
+          def lambda_handler(event, context):
+              try:
+                  if 'body' in event:
+                      body = json.loads(event.get('body', '{}'))
+                  else:
+                      body = event
+                  
+                  slug = body.get('slug', '')
+                  model_id = os.environ.get('MODEL_ID')
+                  
+                  if not slug:
+                      return {
+                          'statusCode': 400,
+                          'body': json.dumps({'error': 'slug is required'})
+                      }
+                  
+                  blog_text = get_article_from_contentful(slug)
+                  if not blog_text:
+                      return {
+                          'statusCode': 404,
+                          'body': json.dumps({'error': 'Article not found'})
+                      }
+                  
+                  tags_data, tags_hash = get_tags_from_contentful_cached()
+                  filtered_tags = pre_filter_tags(blog_text, tags_data, max_tags=100)
+                  
+                  # 文字数チェック
+                  is_long_article = len(blog_text) > 2000
+                  
+                  selected_tags, cache_info = process_article_with_model(
+                      blog_text, filtered_tags, tags_hash, model_id, is_long_article
+                  )
+                  cost_info = calculate_cost(model_id, cache_info)
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'slug': slug,
+                          'model': model_id,
+                          'selected_tags': selected_tags,
+                          'tags_hash': tags_hash[:8],
+                          'filtered_count': len(filtered_tags),
+                          'total_tags_count': len(tags_data),
+                          'is_long_article': is_long_article,
+                          'article_length': len(blog_text),
+                          'cache_info': cache_info,
+                          'cost_jpy': cost_info
+                      }, ensure_ascii=False)
+                  }
+                  
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({'error': str(e)})
+                  }
+
+          def process_article_with_model(blog_text, filtered_tags, tags_hash, model_id, is_long_article):
+              if is_long_article:
+                  summary_text, summary_cache_info = create_summary(blog_text, model_id)
+                  selected_tags, tag_cache_info = select_tags_with_model(
+                      summary_text, filtered_tags, tags_hash, model_id
+                  )
+                  
+                  combined_cache_info = {
+                      'summary_input_tokens': summary_cache_info.get('input_tokens', 0),
+                      'summary_output_tokens': summary_cache_info.get('output_tokens', 0),
+                      'tag_input_tokens': tag_cache_info.get('input_tokens', 0),
+                      'tag_output_tokens': tag_cache_info.get('output_tokens', 0),
+                      'input_tokens': summary_cache_info.get('input_tokens', 0) + tag_cache_info.get('input_tokens', 0),
+                      'output_tokens': summary_cache_info.get('output_tokens', 0) + tag_cache_info.get('output_tokens', 0),
+                      'cache_creation_input_tokens': 0,
+                      'cache_read_input_tokens': 0,
+                      'used_summary': True
+                  }
+                  
+                  return selected_tags, combined_cache_info
+              else:
+                  selected_tags, cache_info = select_tags_with_model(
+                      blog_text, filtered_tags, tags_hash, model_id
+                  )
+                  cache_info['used_summary'] = False
+                  return selected_tags, cache_info
+
+          def create_summary(blog_text, model_id):
+              bedrock = boto3.client('bedrock-runtime')
+              
+              prompt = f"以下のブログ記事を1000文字程度で要約してください。技術的なキーワードや重要な概念は必ず含めてください：\n\n{blog_text}"
+              
+              body = {
+                  "messages": [{"role": "user", "content": [{"text": prompt}]}],
+                  "inferenceConfig": {"maxTokens": 8192, "temperature": 0}
+              }
+              
+              response = bedrock.invoke_model(modelId=model_id, body=json.dumps(body))
+              response_body = json.loads(response['body'].read())
+              
+              summary_text = response_body['output']['message']['content'][0]['text']
+              usage = response_body.get('usage', {})
+              
+              cache_info = {
+                  'input_tokens': usage.get('inputTokens', 0),
+                  'output_tokens': usage.get('outputTokens', 0)
+              }
+              
+              return summary_text, cache_info
+
+          def select_tags_with_model(blog_text, filtered_tags, tags_hash, model_id):
+              bedrock = boto3.client('bedrock-runtime')
+              tags_text = '\n'.join(filtered_tags)
+              
+              system_part = f"あなたはブログ記事の内容分析とタグ付けの専門家です。タグデータハッシュ: {tags_hash} 以下のタグリストから、ブログ記事に最も関連するタグを最大5個選択してください： {tags_text} 選択基準：1.記事の主要テーマとの関連性 2.技術的内容との一致度 3.読者にとっての有用性 回答は必ずこのJSON形式で出力してください: {{\"tags\": [{{\"id\": \"123\", \"name\": \"タグ名\"}}]}} 以下のブログ記事を分析して適切なタグを選択してください："
+              combined_prompt = f"{system_part}\n\n{blog_text}"
+              
+              body = {
+                  "messages": [{"role": "user", "content": [{"text": combined_prompt}]}],
+                  "inferenceConfig": {"maxTokens": 8192, "temperature": 0}
+              }
+              
+              response = bedrock.invoke_model(modelId=model_id, body=json.dumps(body))
+              response_body = json.loads(response['body'].read())
+              
+              result_text = response_body['output']['message']['content'][0]['text']
+              usage = response_body.get('usage', {})
+              
+              cache_info = {
+                  'cache_creation_input_tokens': 0,
+                  'cache_read_input_tokens': 0,
+                  'input_tokens': usage.get('inputTokens', 0),
+                  'output_tokens': usage.get('outputTokens', 0)
+              }
+              
+              tags = extract_tags_from_response(result_text, model_id)
+              return tags, cache_info
+
+          def extract_tags_from_response(result_text, model_id):
+              try:
+                  start = result_text.find('{')
+                  end = result_text.rfind('}') + 1
+                  if start >= 0 and end > start:
+                      json_str = result_text[start:end]
+                      tags = json.loads(json_str)['tags']
+                      return tags if tags else []
+              except Exception as e:
+                  pass
+              return []
+
+          def calculate_cost(model_id, cache_info):
+              usd_to_jpy = 150
+              input_tokens = cache_info.get('input_tokens', 0)
+              output_tokens = cache_info.get('output_tokens', 0)
+              
+              pricing = {'us.amazon.nova-lite-v1:0': {'input': 0.06, 'output': 0.24}}
+              
+              if model_id not in pricing:
+                  return {'error': 'Unknown model pricing'}
+              
+              model_pricing = pricing[model_id]
+              input_cost_usd = (input_tokens / 1_000_000) * model_pricing['input']
+              output_cost_usd = (output_tokens / 1_000_000) * model_pricing['output']
+              total_cost_usd = input_cost_usd + output_cost_usd
+              
+              input_cost_jpy = input_cost_usd * usd_to_jpy
+              output_cost_jpy = output_cost_usd * usd_to_jpy
+              total_cost_jpy = total_cost_usd * usd_to_jpy
+              
+              result = {
+                  'input_cost_jpy': round(input_cost_jpy, 4),
+                  'output_cost_jpy': round(output_cost_jpy, 4),
+                  'total_cost_jpy': round(total_cost_jpy, 4),
+                  'exchange_rate': usd_to_jpy
+              }
+              
+              if cache_info.get('used_summary'):
+                  summary_input = cache_info.get('summary_input_tokens', 0)
+                  summary_output = cache_info.get('summary_output_tokens', 0)
+                  tag_input = cache_info.get('tag_input_tokens', 0)
+                  tag_output = cache_info.get('tag_output_tokens', 0)
+                  
+                  nova_pricing = pricing['us.amazon.nova-lite-v1:0']
+                  summary_cost_usd = (summary_input / 1_000_000) * nova_pricing['input'] + (summary_output / 1_000_000) * nova_pricing['output']
+                  tag_cost_usd = (tag_input / 1_000_000) * model_pricing['input'] + (tag_output / 1_000_000) * model_pricing['output']
+                  
+                  result['summary_cost_jpy'] = round(summary_cost_usd * usd_to_jpy, 4)
+                  result['tag_selection_cost_jpy'] = round(tag_cost_usd * usd_to_jpy, 4)
+              
+              return result
+
+          def get_article_from_contentful(slug):
+              http = urllib3.PoolManager()
+              access_token = os.environ.get('CONTENTFUL_ACCESS_TOKEN')
+              url = f"https://cdn.contentful.com/spaces/ct0aopd36mqt/entries?limit=1&fields.slug={slug}&locale=ja&access_token={access_token}&content_type=blogPost&select=fields.content,fields.title"
+              
+              response = http.request('GET', url)
+              data = json.loads(response.data.decode('utf-8'))
+              
+              if data.get('items') and len(data['items']) > 0:
+                  fields = data['items'][0].get('fields', {})
+                  title = fields.get('title', '')
+                  content = fields.get('content', '')
+                  return f"{title}\n\n{content}"
+              
+              return None
+
+          def get_tags_from_contentful_cached():
+              global TAGS_CACHE, TAGS_HASH
+              
+              if TAGS_CACHE and TAGS_HASH:
+                  return TAGS_CACHE, TAGS_HASH
+              
+              http = urllib3.PoolManager()
+              access_token = os.environ.get('CONTENTFUL_ACCESS_TOKEN')
+              url = f"https://cdn.contentful.com/spaces/ct0aopd36mqt/entries?limit=1&select=fields.tags&access_token={access_token}&content_type=blogTags"
+              
+              response = http.request('GET', url)
+              data = json.loads(response.data.decode('utf-8'))
+              
+              tags_data = []
+              if data.get('items') and len(data['items']) > 0:
+                  tags = data['items'][0].get('fields', {}).get('tags', [])
+                  for tag in tags:
+                      tags_data.append({
+                          'id': tag.get('id'),
+                          'name': tag.get('name')
+                      })
+              
+              content_str = json.dumps(tags_data, sort_keys=True)
+              content_hash = hashlib.md5(content_str.encode('utf-8')).hexdigest()
+              
+              TAGS_CACHE = tags_data
+              TAGS_HASH = content_hash
+              
+              return tags_data, content_hash
+
+          def pre_filter_tags(blog_text, all_tags, max_tags=100):
+              blog_lower = blog_text.lower()
+              keywords = re.findall(r'[A-Za-z0-9]+|[ぁ-んァ-ヶ一-龯]+', blog_text)
+              keywords = [k.lower() for k in keywords if len(k) >= 2]
+              
+              scored_tags = []
+              for tag in all_tags:
+                  tag_id = str(tag.get('id', ''))
+                  tag_name = tag.get('name', '')
+                  
+                  if not tag_id or not tag_name:
+                      continue
+                      
+                  tag_name_lower = tag_name.lower()
+                  
+                  score = 0
+                  if tag_name_lower in blog_lower:
+                      score += 10
+                  
+                  for keyword in keywords:
+                      if keyword in tag_name_lower or tag_name_lower in keyword:
+                          score += 5
+                  
+                  for word in tag_name_lower.split():
+                      if len(word) >= 2 and word in blog_lower:
+                          score += 2
+                  
+                  if score > 0:
+                      scored_tags.append((score, f"{tag_id}\t{tag_name}"))
+              
+  # GPT Lambda Function
+  GPTTagSelectorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: tag-selector-gpt
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt TagSelectorLambdaRole.Arn
+      Timeout: 90
+      MemorySize: 1024
+      Environment:
+        Variables:
+          CONTENTFUL_ACCESS_TOKEN: !Ref ContentfulAccessToken
+          MODEL_ID: 'openai.gpt-oss-20b-1:0'
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import hashlib
+          import urllib3
+          import os
+          import re
+
+          # グローバル変数でキャッシュ
+          TAGS_CACHE = None
+          TAGS_HASH = None
+
+          def lambda_handler(event, context):
+              try:
+                  if 'body' in event:
+                      body = json.loads(event.get('body', '{}'))
+                  else:
+                      body = event
+                  
+                  slug = body.get('slug', '')
+                  model_id = os.environ.get('MODEL_ID')
+                  
+                  if not slug:
+                      return {
+                          'statusCode': 400,
+                          'body': json.dumps({'error': 'slug is required'})
+                      }
+                  
+                  blog_text = get_article_from_contentful(slug)
+                  if not blog_text:
+                      return {
+                          'statusCode': 404,
+                          'body': json.dumps({'error': 'Article not found'})
+                      }
+                  
+                  tags_data, tags_hash = get_tags_from_contentful_cached()
+                  filtered_tags = pre_filter_tags(blog_text, tags_data, max_tags=100)
+                  
+                  # 文字数チェック
+                  is_long_article = len(blog_text) > 2000
+                  
+                  selected_tags, cache_info = process_article_with_model(
+                      blog_text, filtered_tags, tags_hash, model_id, is_long_article
+                  )
+                  cost_info = calculate_cost(model_id, cache_info)
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'slug': slug,
+                          'model': model_id,
+                          'selected_tags': selected_tags,
+                          'tags_hash': tags_hash[:8],
+                          'filtered_count': len(filtered_tags),
+                          'total_tags_count': len(tags_data),
+                          'is_long_article': is_long_article,
+                          'article_length': len(blog_text),
+                          'cache_info': cache_info,
+                          'cost_jpy': cost_info
+                      }, ensure_ascii=False)
+                  }
+                  
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({'error': str(e)})
+                  }
+
+          def process_article_with_model(blog_text, filtered_tags, tags_hash, model_id, is_long_article):
+              if is_long_article:
+                  summary_text, summary_cache_info = create_summary(blog_text, model_id)
+                  selected_tags, tag_cache_info = select_tags_with_model(
+                      summary_text, filtered_tags, tags_hash, model_id
+                  )
+                  
+                  combined_cache_info = {
+                      'summary_input_tokens': summary_cache_info.get('input_tokens', 0),
+                      'summary_output_tokens': summary_cache_info.get('output_tokens', 0),
+                      'tag_input_tokens': tag_cache_info.get('input_tokens', 0),
+                      'tag_output_tokens': tag_cache_info.get('output_tokens', 0),
+                      'input_tokens': summary_cache_info.get('input_tokens', 0) + tag_cache_info.get('input_tokens', 0),
+                      'output_tokens': summary_cache_info.get('output_tokens', 0) + tag_cache_info.get('output_tokens', 0),
+                      'cache_creation_input_tokens': 0,
+                      'cache_read_input_tokens': 0,
+                      'used_summary': True
+                  }
+                  
+                  return selected_tags, combined_cache_info
+              else:
+                  selected_tags, cache_info = select_tags_with_model(
+                      blog_text, filtered_tags, tags_hash, model_id
+                  )
+                  cache_info['used_summary'] = False
+                  return selected_tags, cache_info
+
+          def create_summary(blog_text, model_id):
+              bedrock = boto3.client('bedrock-runtime')
+              
+              body = {
+                  "messages": [
+                      {"role": "system", "content": "あなたは記事要約の専門家です。"},
+                      {"role": "user", "content": f"以下のブログ記事を1000文字程度で要約してください。技術的なキーワードや重要な概念は必ず含めてください：\n\n{blog_text}"}
+                  ],
+                  "max_tokens": 8192,
+                  "temperature": 0
+              }
+              
+              response = bedrock.invoke_model(modelId=model_id, body=json.dumps(body))
+              response_body = json.loads(response['body'].read())
+              
+              summary_text = response_body['choices'][0]['message']['content']
+              usage = response_body.get('usage', {})
+              
+              cache_info = {
+                  'input_tokens': usage.get('prompt_tokens', 0),
+                  'output_tokens': usage.get('completion_tokens', 0)
+              }
+              
+              return summary_text, cache_info
+
+          def select_tags_with_model(blog_text, filtered_tags, tags_hash, model_id):
+              bedrock = boto3.client('bedrock-runtime')
+              tags_text = '\n'.join(filtered_tags)
+              
+              system_content = f"あなたはブログ記事の内容分析とタグ付けの専門家です。タグデータハッシュ: {tags_hash} 以下のタグリストから、ブログ記事に最も関連するタグを最大5個選択してください： {tags_text} 選択基準：1.記事の主要テーマとの関連性 2.技術的内容との一致度 3.読者にとっての有用性 <thinking>タグ内で推論を行い、最終的に以下の形式でJSONのみを出力してください: {{\"tags\": [{{\"id\": \"123\", \"name\": \"タグ名\"}}]}}"
+              
+              body = {
+                  "messages": [
+                      {"role": "system", "content": system_content},
+                      {"role": "user", "content": f"以下のブログ記事を分析してください。<thinking>タグ内で推論し、最終的にJSONのみを出力してください：\n\n{blog_text}"}
+                  ],
+                  "max_tokens": 8192,
+                  "temperature": 0
+              }
+              
+              response = bedrock.invoke_model(modelId=model_id, body=json.dumps(body))
+              response_body = json.loads(response['body'].read())
+              
+              result_text = response_body['choices'][0]['message']['content']
+              usage = response_body.get('usage', {})
+              
+              cache_info = {
+                  'cache_creation_input_tokens': 0,
+                  'cache_read_input_tokens': 0,
+                  'input_tokens': usage.get('prompt_tokens', 0),
+                  'output_tokens': usage.get('completion_tokens', 0)
+              }
+              
+              tags = extract_tags_from_response(result_text, model_id)
+              return tags, cache_info
+
+          def extract_tags_from_response(result_text, model_id):
+              try:
+                  # OpenAI用：<thinking>タグの外側のJSONを探す
+                  thinking_pattern = r'</thinking>\s*(\{[^{}]*"tags"[^{}]*\[[^\]]*\][^{}]*\})'
+                  thinking_match = re.search(thinking_pattern, result_text)
+                  if thinking_match:
+                      json_str = thinking_match.group(1)
+                      tags = json.loads(json_str)['tags']
+                      return tags if tags else []
+                  
+                  # フォールバック：通常のJSONパターン
+                  json_matches = re.findall(r'\{[^{}]*"tags"[^{}]*\[[^\]]*\][^{}]*\}', result_text)
+                  if json_matches:
+                      json_str = json_matches[-1]
+                      tags = json.loads(json_str)['tags']
+                      return tags if tags else []
+              except Exception as e:
+                  pass
+              return []
+
+          def calculate_cost(model_id, cache_info):
+              usd_to_jpy = 150
+              input_tokens = cache_info.get('input_tokens', 0)
+              output_tokens = cache_info.get('output_tokens', 0)
+              
+              pricing = {'openai.gpt-oss-20b-1:0': {'input': 0.15, 'output': 0.6}}
+              
+              if model_id not in pricing:
+                  return {'error': 'Unknown model pricing'}
+              
+              model_pricing = pricing[model_id]
+              input_cost_usd = (input_tokens / 1_000_000) * model_pricing['input']
+              output_cost_usd = (output_tokens / 1_000_000) * model_pricing['output']
+              total_cost_usd = input_cost_usd + output_cost_usd
+              
+              input_cost_jpy = input_cost_usd * usd_to_jpy
+              output_cost_jpy = output_cost_usd * usd_to_jpy
+              total_cost_jpy = total_cost_usd * usd_to_jpy
+              
+              result = {
+                  'input_cost_jpy': round(input_cost_jpy, 4),
+                  'output_cost_jpy': round(output_cost_jpy, 4),
+                  'total_cost_jpy': round(total_cost_jpy, 4),
+                  'exchange_rate': usd_to_jpy
+              }
+              
+              if cache_info.get('used_summary'):
+                  summary_input = cache_info.get('summary_input_tokens', 0)
+                  summary_output = cache_info.get('summary_output_tokens', 0)
+                  tag_input = cache_info.get('tag_input_tokens', 0)
+                  tag_output = cache_info.get('tag_output_tokens', 0)
+                  
+                  gpt_pricing = pricing['openai.gpt-oss-20b-1:0']
+                  summary_cost_usd = (summary_input / 1_000_000) * gpt_pricing['input'] + (summary_output / 1_000_000) * gpt_pricing['output']
+                  tag_cost_usd = (tag_input / 1_000_000) * model_pricing['input'] + (tag_output / 1_000_000) * model_pricing['output']
+                  
+                  result['summary_cost_jpy'] = round(summary_cost_usd * usd_to_jpy, 4)
+                  result['tag_selection_cost_jpy'] = round(tag_cost_usd * usd_to_jpy, 4)
+              
+              return result
+
+          def get_article_from_contentful(slug):
+              http = urllib3.PoolManager()
+              access_token = os.environ.get('CONTENTFUL_ACCESS_TOKEN')
+              url = f"https://cdn.contentful.com/spaces/ct0aopd36mqt/entries?limit=1&fields.slug={slug}&locale=ja&access_token={access_token}&content_type=blogPost&select=fields.content,fields.title"
+              
+              response = http.request('GET', url)
+              data = json.loads(response.data.decode('utf-8'))
+              
+              if data.get('items') and len(data['items']) > 0:
+                  fields = data['items'][0].get('fields', {})
+                  title = fields.get('title', '')
+                  content = fields.get('content', '')
+                  return f"{title}\n\n{content}"
+              
+              return None
+
+          def get_tags_from_contentful_cached():
+              global TAGS_CACHE, TAGS_HASH
+              
+              if TAGS_CACHE and TAGS_HASH:
+                  return TAGS_CACHE, TAGS_HASH
+              
+              http = urllib3.PoolManager()
+              access_token = os.environ.get('CONTENTFUL_ACCESS_TOKEN')
+              url = f"https://cdn.contentful.com/spaces/ct0aopd36mqt/entries?limit=1&select=fields.tags&access_token={access_token}&content_type=blogTags"
+              
+              response = http.request('GET', url)
+              data = json.loads(response.data.decode('utf-8'))
+              
+              tags_data = []
+              if data.get('items') and len(data['items']) > 0:
+                  tags = data['items'][0].get('fields', {}).get('tags', [])
+                  for tag in tags:
+                      tags_data.append({
+                          'id': tag.get('id'),
+                          'name': tag.get('name')
+                      })
+              
+              content_str = json.dumps(tags_data, sort_keys=True)
+              content_hash = hashlib.md5(content_str.encode('utf-8')).hexdigest()
+              
+              TAGS_CACHE = tags_data
+              TAGS_HASH = content_hash
+              
+              return tags_data, content_hash
+
+          def pre_filter_tags(blog_text, all_tags, max_tags=100):
+              blog_lower = blog_text.lower()
+              keywords = re.findall(r'[A-Za-z0-9]+|[ぁ-んァ-ヶ一-龯]+', blog_text)
+              keywords = [k.lower() for k in keywords if len(k) >= 2]
+              
+              scored_tags = []
+              for tag in all_tags:
+                  tag_id = str(tag.get('id', ''))
+                  tag_name = tag.get('name', '')
+                  
+                  if not tag_id or not tag_name:
+                      continue
+                      
+                  tag_name_lower = tag_name.lower()
+                  
+                  score = 0
+                  if tag_name_lower in blog_lower:
+                      score += 10
+                  
+                  for keyword in keywords:
+                      if keyword in tag_name_lower or tag_name_lower in keyword:
+                          score += 5
+                  
+                  for word in tag_name_lower.split():
+                      if len(word) >= 2 and word in blog_lower:
+                          score += 2
+                  
+                  if score > 0:
+                      scored_tags.append((score, f"{tag_id}\t{tag_name}"))
+              
+              scored_tags.sort(reverse=True, key=lambda x: x[0])
+              return [tag for _, tag in scored_tags[:max_tags]]
+
+  # Lambda Function URLs
+  ClaudeTagSelectorFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt ClaudeTagSelectorFunction.Arn
+      AuthType: NONE
+      Cors:
+        AllowCredentials: false
+        AllowHeaders:
+          - "content-type"
+        AllowMethods:
+          - "POST"
+        AllowOrigins:
+          - "*"
+
+  NovaTagSelectorFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt NovaTagSelectorFunction.Arn
+      AuthType: NONE
+      Cors:
+        AllowCredentials: false
+        AllowHeaders:
+          - "content-type"
+        AllowMethods:
+          - "POST"
+        AllowOrigins:
+          - "*"
+
+  GPTTagSelectorFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt GPTTagSelectorFunction.Arn
+      AuthType: NONE
+      Cors:
+        AllowCredentials: false
+        AllowHeaders:
+          - "content-type"
+        AllowMethods:
+          - "POST"
+        AllowOrigins:
+          - "*"
+
+  # Permissions for Function URLs
+  ClaudeTagSelectorFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ClaudeTagSelectorFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+  NovaTagSelectorFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref NovaTagSelectorFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+  GPTTagSelectorFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref GPTTagSelectorFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+Outputs:
+  ClaudeTagSelectorFunctionUrl:
+    Description: "Claude Lambda Function URL"
+    Value: !GetAtt ClaudeTagSelectorFunctionUrl.FunctionUrl
+
+  NovaTagSelectorFunctionUrl:
+    Description: "Nova Lambda Function URL"
+    Value: !GetAtt NovaTagSelectorFunctionUrl.FunctionUrl
+
+  GPTTagSelectorFunctionUrl:
+    Description: "GPT Lambda Function URL"
+    Value: !GetAtt GPTTagSelectorFunctionUrl.FunctionUrl

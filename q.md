@@ -5,6 +5,31 @@
 - **リポジトリ**: `git@github.com:cm-suzuki-ryo/devio-tag-select.git`
 - **ブランチ**: `main`
 
+## 開発・デプロイフロー
+
+### 開発方針
+
+1. **デフォルトモデル**: Claude Haiku
+2. **開発優先順位**: Haiku → Nova → GPT
+3. **変更の流れ**: 
+   - Haikuで機能開発・テスト
+   - 動作確認後、NovaとGPTに反映
+
+### ソース管理
+
+- **開発**: `lambda-code/` ディレクトリでモジュール開発
+- **デプロイ**: CloudFormationテンプレートにコード埋め込み
+- **変更順序**: 
+  1. `lambda-code/` でソース変更
+  2. Haikuで動作確認
+  3. 確認後、CloudFormationテンプレートに反映
+
+### デプロイ対象
+
+- **`claude_cloudformation.yaml`** - Claude Haiku専用
+- **`nova_cloudformation.yaml`** - Amazon Nova Lite専用
+- **`gpt_cloudformation.yaml`** - OpenAI GPT-OSS 20B専用
+
 ## Git操作時の注意事項
 
 ### SSH URLの使用
@@ -47,9 +72,41 @@ git status
 git log --oneline
 ```
 
+## 開発ワークフロー
+
+### 1. ソース変更
+```bash
+# lambda-code/ ディレクトリで開発
+cd lambda-code/
+# ファイル編集...
+```
+
+### 2. Haikuでテスト
+```bash
+# Claude用テンプレートをデプロイ
+aws cloudformation deploy \
+  --template-file claude_cloudformation.yaml \
+  --stack-name tag-selector-claude \
+  --capabilities CAPABILITY_IAM
+```
+
+### 3. 動作確認後、他モデルに反映
+```bash
+# Nova用テンプレートに反映
+# gpt用テンプレートに反映
+# 各テンプレートをデプロイ
+```
+
+### 4. コミット・プッシュ
+```bash
+git add .
+git commit -m "feat: 機能追加の説明"
+git push origin main
+```
+
 ## プロジェクト構成
 
-- CloudFormationテンプレート
+- CloudFormationテンプレート（モデル別）
 - モジュール化されたLambda関数コード
 - 3つのAIモデル対応（Claude、Nova、GPT-OSS）
 - 要約機能付きタグ選択システム

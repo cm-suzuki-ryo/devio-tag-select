@@ -1,0 +1,179 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'EC2 Spot Instance with Amazon Linux 2023 and SSH Security Group'
+
+Parameters:
+  Ec2ImageId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-arm64
+  
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: 'vpc-10544f72'
+    Description: 'VPC ID for Security Group'
+  
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Default: 'subnet-a3cbbb8b'
+    Description: 'Subnet ID for Spot Instance'
+  
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: 'm4mini'
+    Description: 'EC2 Key Pair for SSH access'
+
+Resources:
+# --------------------------------------------- #
+# Security Group For SSH
+# --------------------------------------------- #
+  SecurityGroupSSH:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'SSH access from specific IP'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 133.201.48.65/32
+          Description: 'SSH access from specific IP'
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: 'All outbound traffic'
+
+# --------------------------------------------- #
+# IAM For JOB (ec2)
+# --------------------------------------------- #
+  Ec2IAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: /
+      Policies: !Ref 'AWS::NoValue'
+      RoleName: !Ref 'AWS::NoValue'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  Ec2IAMProfile:
+    Type: AWS::IAM::InstanceProfile
+    DependsOn: Ec2IAMRole
+    Properties:
+      Path: /
+      Roles:
+      - !Ref 'Ec2IAMRole'
+
+# --------------------------------------------- #
+# LaunchTemplate For Spot Instance
+# --------------------------------------------- #
+  Ec2LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        SecurityGroupIds:
+        - !Ref SecurityGroupSSH
+        InstanceInitiatedShutdownBehavior: terminate
+        IamInstanceProfile:
+          Arn: !GetAtt 'Ec2IAMProfile.Arn'
+        ImageId: !Ref 'Ec2ImageId'
+        KeyName: !Ref KeyName
+        Monitoring:
+          Enabled: false
+        InstanceType: r6gd.medium
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 8
+              VolumeType: gp3
+              DeleteOnTermination: true
+              Encrypted: false
+
+        UserData: !Base64
+          Fn::Sub: |
+            #cloud-config
+            repo_update: true
+            repo_upgrade: all
+            packages:
+              - jq
+              - docker
+              - git
+              - unzip
+            runcmd:
+              - yum clean all
+              - free
+              # nvme1n1 (instance store ssd) setup
+              - mkfs.ext4 /dev/nvme1n1
+              - mkdir -p /mnt/nvme1n1
+              - mount /dev/nvme1n1 /mnt/nvme1n1
+              - chmod 755 /mnt/nvme1n1
+              # Create directories on instance store
+              - mkdir -p /mnt/nvme1n1/docker
+              - mkdir -p /mnt/nvme1n1/tmp
+              - mkdir -p /mnt/nvme1n1/workspace
+              - chown -R ec2-user:ec2-user /mnt/nvme1n1/workspace
+              # Docker data directory setup
+              - systemctl stop docker || true
+              - mkdir -p /etc/docker
+              - echo '{"data-root":"/mnt/nvme1n1/docker"}' > /etc/docker/daemon.json
+              # Docker setup
+              - systemctl start docker
+              - systemctl enable docker
+              - usermod -a -G docker ec2-user
+              # Symbolic links for ec2-user
+              - sudo -u ec2-user ln -sf /mnt/nvme1n1/workspace /home/ec2-user/workspace
+              - sudo -u ec2-user ln -sf /mnt/nvme1n1/tmp /home/ec2-user/tmp
+              # Swap file on instance store
+              - /usr/bin/dd if=/dev/zero of=/mnt/nvme1n1/swapfile bs=100M count=10
+              - chmod 600 /mnt/nvme1n1/swapfile
+              - /usr/sbin/mkswap /mnt/nvme1n1/swapfile
+              - /usr/sbin/swapon /mnt/nvme1n1/swapfile
+              - free
+              # Q CLI installation for ec2-user
+              - sudo -u ec2-user bash -c 'cd /home/ec2-user && curl --proto "=https" --tlsv1.2 -sSf "https://desktop-release.q.us-east-1.amazonaws.com/latest/q-aarch64-linux.zip" -o "q.zip"'
+              - sudo -u ec2-user bash -c 'cd /home/ec2-user && unzip q.zip'
+              - sudo -u ec2-user bash -c 'cd /home/ec2-user && ./q/install.sh'
+
+# --------------------------------------------- #
+# Spot Fleet Request
+# --------------------------------------------- #
+  SpotFleetRequest:
+    Type: AWS::EC2::SpotFleet
+    Properties:
+      SpotFleetRequestConfigData:
+        IamFleetRole: !Sub 'arn:aws:iam::${AWS::AccountId}:role/aws-ec2-spot-fleet-tagging-role'
+        AllocationStrategy: 'lowestPrice'
+        TargetCapacity: 1
+        LaunchTemplateConfigs:
+          - LaunchTemplateSpecification:
+              LaunchTemplateId: !Ref Ec2LaunchTemplate
+              Version: !GetAtt Ec2LaunchTemplate.LatestVersionNumber
+            Overrides:
+              - InstanceType: r6gd.medium
+                SubnetId: !Ref SubnetId
+        TerminateInstancesWithExpiration: true
+        Type: 'maintain'
+
+Outputs:
+  SecurityGroupId:
+    Description: 'Security Group ID for SSH access'
+    Value: !Ref SecurityGroupSSH
+    Export:
+      Name: !Sub '${AWS::StackName}-SecurityGroupSSH'
+  
+  LaunchTemplateId:
+    Description: 'Launch Template ID'
+    Value: !Ref Ec2LaunchTemplate
+    Export:
+      Name: !Sub '${AWS::StackName}-LaunchTemplate'
+  
+  SpotFleetRequestId:
+    Description: 'Spot Fleet Request ID'
+    Value: !Ref SpotFleetRequest
+    Export:
+      Name: !Sub '${AWS::StackName}-SpotFleetRequest'
