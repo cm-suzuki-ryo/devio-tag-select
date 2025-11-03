@@ -18,6 +18,12 @@ Parameters:
     Description: 'Bedrock Model ID'
     Default: 'global.anthropic.claude-haiku-4-5-20251001-v1:0'
 
+  CloudFrontSecretHeader:
+    Type: String
+    Description: 'Secret header value for CloudFront authentication'
+    Default: 'MySecretValue123'
+    NoEcho: true
+
 Resources:
 # --------------------------------------------- #
 # IAM Role for Lambda Functions
@@ -51,6 +57,14 @@ Resources:
                 Action:
                   - lambda:InvokeFunction
                 Resource: '*'
+        - PolicyName: SSMParameterAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/tag-selector/${AWS::StackName}/cloudfront-secret'
 
 # --------------------------------------------- #
 # Tags Lambda Function
@@ -269,6 +283,7 @@ Resources:
           USD_TO_JPY: '150'
           SUMMARY_LAMBDA_NAME: !Ref SummaryLambdaFunction
           TAGS_LAMBDA_NAME: !Ref TagsLambdaFunction
+          CLOUDFRONT_SECRET_HEADER: !Ref CloudFrontSecretHeader
       Code:
         ZipFile: |
           import json
@@ -405,6 +420,18 @@ Resources:
           
           def lambda_handler(event, context):
               try:
+                  # Custom header validation for CloudFront access
+                  expected_secret = os.environ.get('CLOUDFRONT_SECRET_HEADER')
+                  if expected_secret:
+                      headers = event.get('headers', {})
+                      # Check both lowercase and original case headers
+                      cloudfront_secret = headers.get('x-cloudfront-secret') or headers.get('X-CloudFront-Secret')
+                      if not cloudfront_secret or cloudfront_secret != expected_secret:
+                          return {
+                              'statusCode': 403,
+                              'body': json.dumps({'error': 'Access denied - CloudFront access required'})
+                          }
+                  
                   # Function URL event handling
                   if 'body' in event and event['body']:
                       if isinstance(event['body'], str):
@@ -466,7 +493,47 @@ Resources:
 
 
 # --------------------------------------------- #
-# Function URL for Main Lambda
+# CloudFront Distribution
+# --------------------------------------------- #
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: 'Tag Selector API CloudFront Distribution with Custom Header Auth'
+        DefaultCacheBehavior:
+          TargetOriginId: TagSelectorLambdaOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+            - PUT
+            - POST
+            - PATCH
+            - DELETE
+          CachedMethods:
+            - GET
+            - HEAD
+          Compress: true
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
+          OriginRequestPolicyId: 88a5eaf4-2fd4-4709-b370-b4c650ea3fcf  # CORS-S3Origin
+        Origins:
+          - Id: TagSelectorLambdaOrigin
+            DomainName: !Select [2, !Split ["/", !GetAtt TagSelectorMainFunctionUrl.FunctionUrl]]
+            CustomOriginConfig:
+              HTTPPort: 443
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols:
+                - TLSv1.2
+            OriginCustomHeaders:
+              - HeaderName: X-CloudFront-Secret
+                HeaderValue: !Ref CloudFrontSecretHeader
+        PriceClass: PriceClass_100
+        HttpVersion: http2
+
+# --------------------------------------------- #
+# Function URL for Main Lambda (NONE Auth with Custom Header)
 # --------------------------------------------- #
   TagSelectorMainFunctionUrl:
     Type: AWS::Lambda::Url
@@ -482,7 +549,7 @@ Resources:
           - "*"
 
 # --------------------------------------------- #
-# Lambda Permission for Function URL
+# Lambda Permissions for Public Access
 # --------------------------------------------- #
   TagSelectorMainUrlPermission:
     Type: AWS::Lambda::Permission
@@ -492,15 +559,34 @@ Resources:
       Principal: "*"
       FunctionUrlAuthType: NONE
 
+  TagSelectorMainInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref TagSelectorFunction
+      Action: lambda:InvokeFunction
+      Principal: "*"
+
 Outputs:
+  CloudFrontDomain:
+    Description: 'CloudFront Distribution Domain Name'
+    Value: !GetAtt CloudFrontDistribution.DomainName
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudFrontDomain'
+
+  CloudFrontUrl:
+    Description: 'CloudFront Distribution URL'
+    Value: !Sub 'https://${CloudFrontDistribution.DomainName}'
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudFrontUrl'
+
   TagSelectorMainUrl:
-    Description: 'Tag Selector Main Lambda Function URL'
+    Description: 'Tag Selector Main Lambda Function URL (Origin)'
     Value: !GetAtt TagSelectorMainFunctionUrl.FunctionUrl
     Export:
       Name: !Sub '${AWS::StackName}-TagSelectorMainUrl'
 
   StackInfo:
-    Description: '3-Lambda Separated Architecture'
-    Value: 'Tags → Summary → Tag Selection'
+    Description: '3-Lambda Separated Architecture with CloudFront'
+    Value: 'CloudFront → Lambda Function URL → Tags → Summary → Tag Selection'
     Export:
       Name: !Sub '${AWS::StackName}-Architecture'
