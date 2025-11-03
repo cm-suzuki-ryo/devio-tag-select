@@ -152,6 +152,8 @@ Resources:
               # Git configuration
               - sudo -u ec2-user git config --global user.name "suzuki.ryo"
               - sudo -u ec2-user git config --global user.email "suzuki.ryo@classmethod.jp"
+              # Clone devio-tag-select repository
+              - sudo -u ec2-user bash -c 'cd /home/ec2-user/workspace && git clone git@github.com:cm-suzuki-ryo/devio-tag-select.git'
 
 # --------------------------------------------- #
 # Spot Fleet Request

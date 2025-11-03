@@ -126,6 +126,8 @@ Resources:
               - sudo -u ec2-user bash -c 'cd /home/ec2-user && curl --proto "=https" --tlsv1.2 -sSf "https://desktop-release.q.us-east-1.amazonaws.com/latest/q-aarch64-linux.zip" -o "q.zip"'
               - sudo -u ec2-user bash -c 'cd /home/ec2-user && unzip q.zip'
               - sudo -u ec2-user bash -c 'cd /home/ec2-user && ./q/install.sh'
+              # Clone devio-tag-select repository
+              - sudo -u ec2-user bash -c 'cd /home/ec2-user/workspace && git clone https://github.com/cm-suzuki-ryo/devio-tag-select.git'
 
 Outputs:
   SecurityGroupId:
