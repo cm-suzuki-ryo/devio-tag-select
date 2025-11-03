@@ -268,5 +268,58 @@ LambdaFunctionUrl:
 
 ---
 
+## 🌐 **HTML Viewer - Web UI**
+
+### **概要**
+Tag Selectorの解析結果を美しいHTML形式で表示するWebインターフェース
+
+### **機能**
+- **Slug入力フォーム**: 記事slugを入力して解析実行
+- **リアルタイム解析**: 既存Tag Selector統合システムと連携
+- **美しいHTML表示**: 記事要約、タグ、フィードバック、コストを視覚化
+- **レスポンシブデザイン**: モバイル対応のクリーンなUI
+
+### **アーキテクチャ**
+```
+Browser → HTML Viewer Lambda → Tag Selector統合システム
+                              ├─ Step Functions実行
+                              ├─ 記事解析処理
+                              └─ JSON結果返却
+```
+
+### **デプロイ済みURL**
+**https://zupizdxckbvx5y74xi3wbsskiy0fufcl.lambda-url.us-west-2.on.aws/**
+
+### **使用方法**
+1. 上記URLにアクセス
+2. 記事のslugを入力（例: `amazon-ebs-performance-monitoring-metrics-ebs-volumes`）
+3. 「記事を解析」ボタンをクリック
+4. 解析結果がHTML形式で表示
+
+### **技術スタック**
+- **フレームワーク**: Hono v4.0.0 (Node.js)
+- **ランタイム**: AWS Lambda (Node.js 20.x)
+- **統合**: 外部Lambda URL呼び出し
+- **UI**: レスポンシブHTML/CSS
+
+### **ソースコード**
+```
+html-viewer/
+├── integrated-lambda.yaml           # 統合版CloudFormation
+├── server.js                        # ローカル開発用
+├── index.js                         # Lambda関数コード
+└── package.json                     # Node.js依存関係
+```
+
+### **ローカル開発**
+```bash
+cd html-viewer
+npm install
+npm run dev
+# http://localhost:3000 でアクセス
+```
+
+---
+
 ## 📖 **人間向け情報**
 詳細な使用方法、推奨用途、テスト環境については [USAGE.md](USAGE.md) を参照してください。
