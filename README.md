@@ -237,6 +237,110 @@ aws cloudformation deploy \
 4. デプロイ・動作確認
 5. セキュリティテスト実施
 
+### 📝 **Lambda実装ガイド**
+
+#### **CloudFormationでのLambda関数作成**
+```yaml
+# 基本構造
+LambdaFunction:
+  Type: AWS::Lambda::Function
+  Properties:
+    FunctionName: function-name
+    Runtime: python3.11
+    Handler: index.lambda_handler
+    Role: !GetAtt LambdaExecutionRole.Arn
+    Timeout: 300
+    MemorySize: 1024
+    Environment:
+      Variables:
+        ENV_VAR: value
+    Code:
+      ZipFile: |
+        # インライン Python コード
+        import json
+        def lambda_handler(event, context):
+            return {'statusCode': 200}
+```
+
+#### **カスタムヘッダー認証実装**
+```python
+# Lambda関数内でのヘッダー検証
+def lambda_handler(event, context):
+    try:
+        # カスタムヘッダー検証
+        expected_secret = os.environ.get('CLOUDFRONT_SECRET_HEADER')
+        if expected_secret:
+            headers = event.get('headers', {})
+            cloudfront_secret = headers.get('x-cloudfront-secret') or headers.get('X-CloudFront-Secret')
+            if not cloudfront_secret or cloudfront_secret != expected_secret:
+                return {
+                    'statusCode': 403,
+                    'body': json.dumps({'error': 'Access denied - CloudFront access required'})
+                }
+        
+        # 通常の処理
+        # ...
+```
+
+#### **CloudFrontカスタムヘッダー設定**
+```yaml
+# CloudFront Distribution設定
+Origins:
+  - Id: LambdaOrigin
+    DomainName: !Select [2, !Split ["/", !GetAtt LambdaFunctionUrl.FunctionUrl]]
+    CustomOriginConfig:
+      HTTPPort: 443
+      OriginProtocolPolicy: https-only
+    OriginCustomHeaders:
+      - HeaderName: X-CloudFront-Secret
+        HeaderValue: !Ref CloudFrontSecretHeader
+```
+
+#### **パラメータ化された秘密値**
+```yaml
+Parameters:
+  CloudFrontSecretHeader:
+    Type: String
+    Description: 'Secret header value for CloudFront authentication'
+    Default: 'MySecretValue123'
+    NoEcho: true
+
+# Lambda環境変数で参照
+Environment:
+  Variables:
+    CLOUDFRONT_SECRET_HEADER: !Ref CloudFrontSecretHeader
+```
+
+#### **Function URL設定**
+```yaml
+# NONE認証タイプ（カスタムヘッダーで保護）
+LambdaFunctionUrl:
+  Type: AWS::Lambda::Url
+  Properties:
+    TargetFunctionArn: !GetAtt LambdaFunction.Arn
+    AuthType: NONE
+    Cors:
+      AllowCredentials: false
+      AllowMethods: [GET, POST]
+      AllowOrigins: ["*"]
+
+# パブリックアクセス許可
+LambdaUrlPermission:
+  Type: AWS::Lambda::Permission
+  Properties:
+    FunctionName: !Ref LambdaFunction
+    Action: lambda:InvokeFunctionUrl
+    Principal: "*"
+    FunctionUrlAuthType: NONE
+```
+
+#### **ソースコード統合手順**
+1. **lambda-code/**でソース開発
+2. **ZipFile**でCloudFormationに埋め込み
+3. **環境変数**で設定値を外部化
+4. **IAM権限**を適切に設定
+5. **テスト**でセキュリティ検証
+
 ---
 
 ## 📖 **人間向け情報**

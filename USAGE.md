@@ -167,6 +167,71 @@ docker run --rm -e AWS_DEFAULT_REGION=us-west-2 -v ~/.aws:/root/.aws:ro gpt-test
 └── ec2/                              # EC2環境設定
 ```
 
+## Lambda開発ガイド
+
+### **ソースコード構造**
+```
+lambda-code/
+├── tags_lambda.py              # タグ取得Lambda
+├── summary_lambda.py           # 要約Lambda  
+├── tag_selector_lambda.py      # タグ選択Lambda
+├── common.py                   # 共通関数
+├── enhanced_common.py          # MeCab対応共通関数
+└── model_router.py             # モデル振り分け
+```
+
+### **CloudFormationテンプレート作成**
+
+#### **1. Lambda関数定義**
+```yaml
+LambdaFunction:
+  Type: AWS::Lambda::Function
+  Properties:
+    FunctionName: my-function
+    Runtime: python3.11
+    Handler: index.lambda_handler
+    Code:
+      ZipFile: |
+        # lambda-code/から移植したPythonコード
+```
+
+#### **2. カスタムヘッダー認証追加**
+```python
+# Lambda関数内に追加
+def lambda_handler(event, context):
+    # ヘッダー検証
+    expected_secret = os.environ.get('CLOUDFRONT_SECRET_HEADER')
+    if expected_secret:
+        headers = event.get('headers', {})
+        secret = headers.get('x-cloudfront-secret')
+        if not secret or secret != expected_secret:
+            return {'statusCode': 403, 'body': 'Access denied'}
+    
+    # 通常処理
+    # ...
+```
+
+#### **3. CloudFront設定**
+```yaml
+# カスタムヘッダー送信
+OriginCustomHeaders:
+  - HeaderName: X-CloudFront-Secret
+    HeaderValue: !Ref CloudFrontSecretHeader
+```
+
+### **開発ワークフロー**
+1. **lambda-code/**でローカル開発
+2. **Dockerテスト**で動作確認
+3. **CloudFormation ZipFile**に統合
+4. **デプロイ**してテスト
+5. **セキュリティ検証**（直接アクセス403確認）
+
+### **セキュリティベストプラクティス**
+- **秘密値**: CloudFormationパラメータで外部化
+- **NoEcho**: パラメータで秘密値を隠蔽
+- **ヘッダー検証**: 大文字小文字両方をチェック
+- **403エラー**: 不正アクセス時の適切なレスポンス
+
 ## Git操作
 ```bash
 # SSH URL使用（推奨）
