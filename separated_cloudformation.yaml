@@ -1,0 +1,374 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: '3-Lambda Separated Architecture - Tags, Summary, and Tag Selection'
+
+Parameters:
+  ContentfulAccessToken:
+    Type: String
+    Description: 'Contentful API Access Token'
+    Default: '6Z4wPWStkHj3d_EA0MQt89nWJpIFSBJcmAQ_YzDpkAg'
+    NoEcho: true
+  
+  ContentfulSpaceId:
+    Type: String
+    Description: 'Contentful Space ID'
+    Default: 'ct0aopd36mqt'
+  
+  ModelId:
+    Type: String
+    Description: 'Bedrock Model ID'
+    Default: 'global.anthropic.claude-haiku-4-5-20251001-v1:0'
+
+Resources:
+# --------------------------------------------- #
+# IAM Role for Lambda Functions
+# --------------------------------------------- #
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: BedrockAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource: '*'
+        - PolicyName: LambdaInvokeAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: '*'
+
+# --------------------------------------------- #
+# Tags Lambda Function
+# --------------------------------------------- #
+  TagsLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: tag-selector-tags
+      Runtime: python3.11
+      Handler: tags_lambda.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 60
+      MemorySize: 512
+      Environment:
+        Variables:
+          CONTENTFUL_ACCESS_TOKEN: !Ref ContentfulAccessToken
+          CONTENTFUL_SPACE_ID: !Ref ContentfulSpaceId
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import time
+          import urllib3
+          import hashlib
+
+          def get_tags_from_contentful():
+              """Contentfulからタグ一覧を取得"""
+              access_token = os.environ.get('CONTENTFUL_ACCESS_TOKEN')
+              if not access_token:
+                  raise ValueError("CONTENTFUL_ACCESS_TOKEN environment variable is required")
+              
+              space_id = os.environ.get('CONTENTFUL_SPACE_ID', 'ct0aopd36mqt')
+              http = urllib3.PoolManager()
+              
+              # タグ一覧を取得
+              url = f"https://cdn.contentful.com/spaces/{space_id}/entries?limit=1&select=fields.tags&access_token={access_token}&content_type=blogTags"
+              
+              response = http.request('GET', url)
+              if response.status != 200:
+                  raise Exception(f"Contentful API error: {response.status}")
+              
+              data = json.loads(response.data.decode('utf-8'))
+              
+              # タグデータを抽出
+              tags_data = []
+              if data.get('items') and len(data['items']) > 0:
+                  fields = data['items'][0].get('fields', {})
+                  tags_list = fields.get('tags', [])
+                  
+                  for i, tag_obj in enumerate(tags_list):
+                      if tag_obj and isinstance(tag_obj, dict):
+                          tag_name = tag_obj.get('name', '')
+                          if tag_name:
+                              tags_data.append({
+                                  'id': str(i + 1),
+                                  'name': tag_name
+                              })
+              
+              # ハッシュ値計算
+              content_str = json.dumps(tags_data, sort_keys=True, ensure_ascii=False)
+              content_hash = hashlib.md5(content_str.encode('utf-8')).hexdigest()
+              
+              return tags_data, content_hash
+
+          def lambda_handler(event, context):
+              """タグ取得専用Lambda関数のハンドラー"""
+              try:
+                  # タグデータ取得
+                  tags_data, tags_hash = get_tags_from_contentful()
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'tags_data': tags_data,
+                          'tags_hash': tags_hash,
+                          'tags_count': len(tags_data),
+                          'timestamp': time.time()
+                      }, ensure_ascii=False)
+                  }
+                  
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({
+                          'error': str(e)
+                      }, ensure_ascii=False)
+                  }
+
+# --------------------------------------------- #
+# Summary Lambda Function
+# --------------------------------------------- #
+  SummaryLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: tag-selector-summary
+      Runtime: python3.11
+      Handler: summary_lambda.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      MemorySize: 1024
+      Environment:
+        Variables:
+          CONTENTFUL_ACCESS_TOKEN: !Ref ContentfulAccessToken
+          CONTENTFUL_SPACE_ID: !Ref ContentfulSpaceId
+          MODEL_ID: !Ref ModelId
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import urllib3
+          import boto3
+          
+          def get_article_from_contentful(slug):
+              """Contentfulから記事を取得"""
+              http = urllib3.PoolManager()
+              access_token = os.environ.get('CONTENTFUL_ACCESS_TOKEN')
+              space_id = os.environ.get('CONTENTFUL_SPACE_ID', 'ct0aopd36mqt')
+              url = f"https://cdn.contentful.com/spaces/{space_id}/entries?limit=1&fields.slug={slug}&locale=ja&access_token={access_token}&content_type=blogPost&select=fields.content,fields.title"
+              
+              response = http.request('GET', url)
+              if response.status != 200:
+                  raise Exception(f"Contentful API error: {response.status}")
+              
+              data = json.loads(response.data.decode('utf-8'))
+              
+              if data.get('items') and len(data['items']) > 0:
+                  fields = data['items'][0].get('fields', {})
+                  title = fields.get('title', '')
+                  content = fields.get('content', '')
+                  return f"{title}\n\n{content}"
+              
+              return None
+
+          def create_summary_with_claude(blog_text, model_id):
+              """Claudeモデルで記事要約を作成"""
+              bedrock = boto3.client('bedrock-runtime')
+              
+              body = {
+                  "anthropic_version": "bedrock-2023-05-31",
+                  "max_tokens": 8000,
+                  "system": [{"type": "text", "text": "あなたは記事要約の専門家です。"}],
+                  "messages": [{
+                      "role": "user",
+                      "content": f"以下のブログ記事を1000文字程度で要約してください。技術的なキーワードや重要な概念は必ず含めてください：\n\n{blog_text}"
+                  }]
+              }
+              
+              response = bedrock.invoke_model(
+                  modelId=model_id,
+                  body=json.dumps(body)
+              )
+              
+              response_body = json.loads(response['body'].read())
+              summary_text = response_body['content'][0]['text']
+              
+              cache_info = {
+                  'input_tokens': response_body['usage']['input_tokens'],
+                  'output_tokens': response_body['usage']['output_tokens']
+              }
+              
+              return summary_text, cache_info
+
+          def lambda_handler(event, context):
+              """要約専用Lambda関数のハンドラー"""
+              try:
+                  # パラメータ取得
+                  article_id = event.get('article_id')
+                  model_id = event.get('model_id', os.environ.get('MODEL_ID'))
+                  blog_text = event.get('blog_text')
+                  
+                  # 記事テキスト取得
+                  if not blog_text and article_id:
+                      blog_text = get_article_from_contentful(article_id)
+                  elif not blog_text:
+                      raise ValueError("article_id or blog_text is required")
+                  
+                  # 要約作成
+                  summary_text, cache_info = create_summary_with_claude(blog_text, model_id)
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'summary_text': summary_text,
+                          'cache_info': cache_info,
+                          'model_id': model_id
+                      }, ensure_ascii=False)
+                  }
+                  
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({
+                          'error': str(e)
+                      }, ensure_ascii=False)
+                  }
+
+# --------------------------------------------- #
+# Tag Selector Lambda Function
+# --------------------------------------------- #
+  TagSelectorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: tag-selector-main
+      Runtime: python3.11
+      Handler: tag_selector_lambda.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      MemorySize: 1024
+      Environment:
+        Variables:
+          CONTENTFUL_ACCESS_TOKEN: !Ref ContentfulAccessToken
+          CONTENTFUL_SPACE_ID: !Ref ContentfulSpaceId
+          MODEL_ID: !Ref ModelId
+          INPUT_PRICE_PER_MILLION: '0.25'
+          OUTPUT_PRICE_PER_MILLION: '1.25'
+          USD_TO_JPY: '150'
+          SUMMARY_LAMBDA_NAME: !Ref SummaryLambdaFunction
+          TAGS_LAMBDA_NAME: !Ref TagsLambdaFunction
+      Code:
+        ZipFile: |
+          # Placeholder - actual code would be deployed separately
+          import json
+          def lambda_handler(event, context):
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({'message': 'Tag Selector Lambda - Deploy actual code'})
+              }
+
+# --------------------------------------------- #
+# Function URLs
+# --------------------------------------------- #
+  TagsLambdaFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt TagsLambdaFunction.Arn
+      AuthType: NONE
+      Cors:
+        AllowCredentials: false
+        AllowMethods:
+          - GET
+          - POST
+        AllowOrigins:
+          - "*"
+
+  SummaryLambdaFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt SummaryLambdaFunction.Arn
+      AuthType: NONE
+      Cors:
+        AllowCredentials: false
+        AllowMethods:
+          - GET
+          - POST
+        AllowOrigins:
+          - "*"
+
+  TagSelectorFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt TagSelectorFunction.Arn
+      AuthType: NONE
+      Cors:
+        AllowCredentials: false
+        AllowMethods:
+          - GET
+          - POST
+        AllowOrigins:
+          - "*"
+
+# --------------------------------------------- #
+# Lambda Permissions for Function URLs
+# --------------------------------------------- #
+  TagsLambdaUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref TagsLambdaFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+  SummaryLambdaUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SummaryLambdaFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+  TagSelectorUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref TagSelectorFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+Outputs:
+  TagsLambdaUrl:
+    Description: 'Tags Lambda Function URL'
+    Value: !GetAtt TagsLambdaFunctionUrl.FunctionUrl
+    Export:
+      Name: !Sub '${AWS::StackName}-TagsLambdaUrl'
+
+  SummaryLambdaUrl:
+    Description: 'Summary Lambda Function URL'
+    Value: !GetAtt SummaryLambdaFunctionUrl.FunctionUrl
+    Export:
+      Name: !Sub '${AWS::StackName}-SummaryLambdaUrl'
+
+  TagSelectorUrl:
+    Description: 'Tag Selector Lambda Function URL'
+    Value: !GetAtt TagSelectorFunctionUrl.FunctionUrl
+    Export:
+      Name: !Sub '${AWS::StackName}-TagSelectorUrl'
+
+  StackInfo:
+    Description: '3-Lambda Separated Architecture'
+    Value: 'Tags → Summary → Tag Selection'
+    Export:
+      Name: !Sub '${AWS::StackName}-Architecture'
