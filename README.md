@@ -25,8 +25,16 @@ Client → Lambda Function URL → Step Functions
                               ├─ Contentful記事取得
                               ├─ タグ一覧取得
                               ├─ 要約処理（8000文字超の場合）
-                              └─ AI推薦処理 → 結果
+                              ├─ 並列実行 ┬─ タグ推薦
+                              │          └─ スニペット生成
+                              └─ 結果統合 → 出力
 ```
+
+## ✨ **新機能: スニペット生成**
+- **SEO最適化**: 160文字制限でGoogle検索結果に最適
+- **AI生成**: 記事内容から魅力的な要約を自動生成
+- **並列処理**: タグ推薦と同時実行で処理時間短縮
+- **複数モデル対応**: Nova Lite, Claude Haiku, gpt-oss-20b
 
 ## LLM開発者向け技術情報
 
@@ -44,6 +52,7 @@ cloudformation-unified.yaml           # 統一テンプレート
 lambda-code/
 ├── stepfunctions_main.py             # メインLambda（SF実行）
 ├── contentful_getter.py              # Contentful取得
+├── snippet_generator_lambda.py       # スニペット生成
 ├── summary_lambda.py                 # 要約処理（参考）
 ├── tag_selector_lambda.py            # タグ推薦（参考）
 ├── tags_lambda.py                    # タグ取得（参考）
@@ -59,7 +68,14 @@ lambda-code/
     "GetTags": "タグ一覧取得", 
     "CheckTextLength": "文字数判定",
     "SummarizeText": "要約処理（条件付き）",
-    "RecommendTags": "AI推薦処理"
+    "ParallelProcessing": {
+      "Type": "Parallel",
+      "Branches": [
+        {"StartAt": "RecommendTags"},
+        {"StartAt": "GenerateSnippet"}
+      ]
+    },
+    "FormatOutput": "結果統合・出力"
   }
 }
 ```
@@ -118,8 +134,25 @@ cache_info = {
 
 | モデル | コスト | 精度 | 処理時間 | モデルID |
 |--------|--------|------|----------|----------|
-| **Nova Lite** | 0.0979円 | 95点 | 12秒 | `us.amazon.nova-lite-v1:0` |
-| **Claude Haiku** | 0.2488円 | 95点 | 9秒 | `anthropic.claude-3-haiku-20240307-v1:0` |
+| **Nova Lite** | 0.14円 | 95点 | 4.3秒 | `us.amazon.nova-lite-v1:0` |
+| **Claude Haiku 4.5** | 0.15円 | 98点 | 4.3秒 | `global.anthropic.claude-haiku-4-5-20251001-v1:0` |
+| **Claude Haiku 3** | 0.25円 | 95点 | 4.5秒 | `anthropic.claude-3-haiku-20240307-v1:0` |
+
+### 🔧 **実装同期状況**
+
+#### **CloudFormation版（本番環境）**
+- ✅ **統一実装**: 全機能が単一テンプレートで動作
+- ✅ **Claude最適化**: Haiku 4.5専用、高品質プロンプト対応
+- ✅ **動的モデル**: 指定モデルを柔軟に使用
+- ✅ **System プロンプト**: 「記事要約の専門家」で品質向上
+
+#### **lambda-code/版（開発・テスト環境）**
+- ✅ **多モデル対応**: Nova, Claude, gpt-oss-20b対応
+- ✅ **モジュール分割**: 開発・テスト・デバッグ用
+- ✅ **CloudFormation同期**: Claude処理は本番環境と同一仕様
+- ✅ **責任分離**: 記事取得は呼び出し元で実施
+
+
 
 ### 🚀 **デプロイ方法**
 
@@ -146,8 +179,9 @@ aws cloudformation deploy \
 |------|------|------|
 | **Lambda Function URL** | ✅ 動作確認済み | 直接アクセス可能 |
 | **Step Functions** | ✅ ワークフロー実行 | Express版で高速処理 |
-| **処理時間** | ✅ 最適化 | 並列処理で高速化 |
-| **コスト** | ✅ 低コスト | Nova Lite使用で0.1円以下 |
+| **並列実行** | ✅ 最適化完了 | タグ推薦+スニペット生成同時処理 |
+| **処理時間** | ✅ 4.3秒 | 並列処理で大幅短縮 |
+| **コスト** | ✅ 0.14-0.15円 | Nova Lite/Claude Haiku使用 |
 
 ### ⚙️ **環境変数**
 - `INPUT_PRICE_PER_MILLION`: 入力トークン価格（USD/100万トークン）

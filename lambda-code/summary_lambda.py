@@ -3,7 +3,6 @@ import os
 from claude_model import create_summary_with_claude
 from nova_model import create_summary_with_nova
 from gpt_model import create_summary_with_gpt
-from common import get_article_from_contentful
 
 def create_summary_by_model(blog_text, model_id):
     """モデルに応じて要約を作成"""
@@ -20,15 +19,12 @@ def lambda_handler(event, context):
     """要約専用Lambda関数のハンドラー"""
     try:
         # パラメータ取得
-        article_id = event.get('article_id')
         model_id = event.get('model_id', os.environ.get('MODEL_ID'))
         blog_text = event.get('blog_text')
         
-        # 記事テキスト取得（article_idまたはblog_textのいずれかが必要）
-        if not blog_text and article_id:
-            blog_text = get_article_from_contentful(article_id)
-        elif not blog_text:
-            raise ValueError("article_id or blog_text is required")
+        # 記事テキスト必須チェック
+        if not blog_text:
+            raise ValueError("blog_text is required")
         
         # 要約作成
         summary_text, cache_info = create_summary_by_model(blog_text, model_id)
@@ -48,4 +44,5 @@ def lambda_handler(event, context):
             'body': json.dumps({
                 'error': str(e)
             }, ensure_ascii=False)
+        }
         }

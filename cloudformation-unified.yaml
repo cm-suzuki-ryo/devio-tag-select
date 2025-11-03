@@ -302,7 +302,7 @@ Resources:
                   
                   bedrock = boto3.client('bedrock-runtime', region_name='us-west-2')
                   
-                  prompt = f"以下のブログ記事を800文字程度で要約してください:\n\n{blog_text}"
+                  prompt = f"以下のブログ記事を1000文字程度で要約してください。技術的なキーワードや重要な概念は必ず含めてください：\n\n{blog_text}"
                   
                   if 'nova' in model_id.lower():
                       body = {
@@ -320,10 +320,11 @@ Resources:
                       # Claude fallback
                       body = {
                           "anthropic_version": "bedrock-2023-05-31",
-                          "max_tokens": 8000,
+                          "max_tokens": 8192,
+                          "system": [{"type": "text", "text": "あなたは記事要約の専門家です。"}],
                           "messages": [{"role": "user", "content": prompt}]
                       }
-                      response = bedrock.invoke_model(modelId='anthropic.claude-3-haiku-20240307-v1:0', body=json.dumps(body))
+                      response = bedrock.invoke_model(modelId=model_id, body=json.dumps(body))
                       response_body = json.loads(response['body'].read())
                       summary_text = response_body['content'][0]['text']
                       cache_info = {
@@ -455,7 +456,7 @@ Resources:
                           "max_tokens": 8000,
                           "messages": [{"role": "user", "content": prompt}]
                       }
-                      response = bedrock.invoke_model(modelId='anthropic.claude-3-haiku-20240307-v1:0', body=json.dumps(body))
+                      response = bedrock.invoke_model(modelId=model_id, body=json.dumps(body))
                       response_body = json.loads(response['body'].read())
                       result_text = response_body['content'][0]['text']
                       cache_info = {
@@ -778,7 +779,7 @@ Resources:
                       "messages": [{"role": "user", "content": prompt}]
                   }
                   response = bedrock.invoke_model(
-                      modelId='anthropic.claude-3-haiku-20240307-v1:0', 
+                      modelId=model_id, 
                       body=json.dumps(body)
                   )
                   response_body = json.loads(response['body'].read())
