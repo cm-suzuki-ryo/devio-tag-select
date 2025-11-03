@@ -1,0 +1,820 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Unified Tag Selector with Step Functions - All in One Template'
+
+Parameters:
+  ContentfulSpaceId:
+    Type: String
+    Description: 'Contentful Space ID'
+    Default: 'your-space-id'
+  ContentfulAccessToken:
+    Type: String
+    Description: 'Contentful Access Token'
+    Default: 'your-access-token'
+    NoEcho: true
+
+Resources:
+  # IAM Role for Step Functions
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaInvokePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:tag-selector-*'
+
+  # Lambda Execution Role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: BedrockInvokePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: '*'
+        - PolicyName: StepFunctionsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: states:StartSyncExecution
+                Resource: !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:tag-selector-unified'
+        - PolicyName: LambdaInvokePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:tag-selector-*'
+
+  # Step Functions State Machine
+  TagSelectorStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: tag-selector-unified
+      StateMachineType: EXPRESS
+      RoleArn: !GetAtt StepFunctionsRole.Arn
+      DefinitionString: !Sub |
+        {
+          "StartAt": "SetCostParameters",
+          "States": {
+            "SetCostParameters": {
+              "Type": "Pass",
+              "Parameters": {
+                "input_price_per_million": 0.25,
+                "output_price_per_million": 1.25,
+                "usd_to_jpy": 150
+              },
+              "ResultPath": "$.cost_params",
+              "Next": "GetArticle"
+            },
+            "GetArticle": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${ContentfulGetterFunction}",
+                "Payload": {"slug.$": "$.slug", "model_id.$": "$.model_id"}
+              },
+              "ResultPath": "$.article",
+              "Next": "GetTags"
+            },
+            "GetTags": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {"FunctionName": "${TagsFunction}", "Payload": {}},
+              "ResultPath": "$.tags",
+              "Next": "CheckTextLength"
+            },
+            "CheckTextLength": {
+              "Type": "Choice",
+              "Choices": [{
+                "Variable": "$.article.Payload.text_length",
+                "NumericGreaterThan": 8000,
+                "Next": "SummarizeText"
+              }],
+              "Default": "RecommendTags"
+            },
+            "SummarizeText": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${SummaryFunction}",
+                "Payload": {"blog_text.$": "$.article.Payload.blog_text", "model_id.$": "$.model_id"}
+              },
+              "ResultPath": "$.summary",
+              "Next": "RecommendTags"
+            },
+            "RecommendTags": {
+              "Type": "Parallel",
+              "Branches": [
+                {
+                  "StartAt": "TagRecommendation",
+                  "States": {
+                    "TagRecommendation": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::lambda:invoke",
+                      "Parameters": {
+                        "FunctionName": "${RecommendationFunction}",
+                        "Payload.$": "$"
+                      },
+                      "End": true
+                    }
+                  }
+                },
+                {
+                  "StartAt": "SnippetGeneration", 
+                  "States": {
+                    "SnippetGeneration": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::lambda:invoke",
+                      "Parameters": {
+                        "FunctionName": "${SnippetGeneratorFunction}",
+                        "Payload": {
+                          "title.$": "$.article.Payload.title",
+                          "content.$": "$.article.Payload.content",
+                          "model_id.$": "$.model_id"
+                        }
+                      },
+                      "End": true
+                    }
+                  }
+                }
+              ],
+              "ResultPath": "$.parallel_results",
+              "Next": "FormatOutput"
+            },
+            "FormatOutput": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${OutputFormatterFunction}",
+                "Payload.$": "$"
+              },
+              "ResultSelector": {
+                "result.$": "$.Payload"
+              },
+              "End": true
+            }
+          }
+        }
+
+  # Main Lambda Function
+  MainFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: tag-selector-unified-main
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      Code:
+        ZipFile: !Sub |
+          import json
+          import boto3
+          import os
+          import uuid
+
+          def lambda_handler(event, context):
+              try:
+                  if event.get('httpMethod'):
+                      params = event.get('queryStringParameters') or {} if event['httpMethod'] == 'GET' else json.loads(event.get('body', '{}'))
+                  else:
+                      params = event
+
+                  slug = params.get('slug')
+                  model_id = params.get('model_id', 'global.anthropic.claude-haiku-4-5-20251001-v1:0')
+
+                  if not slug:
+                      return {'statusCode': 400, 'body': json.dumps({'error': 'slug required'})}
+
+                  stepfunctions = boto3.client('stepfunctions')
+                  response = stepfunctions.start_sync_execution(
+                      stateMachineArn='${TagSelectorStateMachine}',
+                      name=f"tag-selector-{uuid.uuid4().hex[:8]}",
+                      input=json.dumps({'slug': slug, 'model_id': model_id})
+                  )
+
+                  if response['status'] == 'SUCCEEDED':
+                      result = json.loads(response['output'])
+                      return {'statusCode': 200, 'headers': {'Content-Type': 'application/json'}, 'body': json.dumps(result['result'])}
+                  else:
+                      return {'statusCode': 500, 'body': json.dumps({'error': 'Step Functions failed'})}
+
+              except Exception as e:
+                  return {'statusCode': 500, 'body': json.dumps({'error': str(e)})}
+
+  # Contentful Getter Function
+  ContentfulGetterFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: tag-selector-contentful
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      Environment:
+        Variables:
+          CONTENTFUL_SPACE_ID: !Ref ContentfulSpaceId
+          CONTENTFUL_ACCESS_TOKEN: !Ref ContentfulAccessToken
+      Code:
+        ZipFile: |
+          import json
+          import urllib.request
+          import urllib.parse
+          import os
+
+          def lambda_handler(event, context):
+              try:
+                  slug = event['slug']
+                  space_id = os.environ['CONTENTFUL_SPACE_ID']
+                  access_token = os.environ['CONTENTFUL_ACCESS_TOKEN']
+                  
+                  params = {
+                      'access_token': access_token,
+                      'content_type': 'blogPost',
+                      'fields.slug': slug,
+                      'limit': '1'
+                  }
+                  
+                  url = f"https://cdn.contentful.com/spaces/{space_id}/entries?" + urllib.parse.urlencode(params)
+                  
+                  with urllib.request.urlopen(url) as response:
+                      data = json.loads(response.read().decode())
+                  
+                  if not data['items']:
+                      raise Exception(f"Article not found: {slug}")
+                  
+                  item = data['items'][0]['fields']
+                  title = item.get('title', '')
+                  content = item.get('content', '')
+                  blog_text = f"{title}\n\n{content}"
+                  
+                  return {
+                      'title': title,
+                      'content': content, 
+                      'blog_text': blog_text,
+                      'text_length': len(blog_text)
+                  }
+              except Exception as e:
+                  raise Exception(f"Failed to get article: {str(e)}")
+
+  # Summary Function
+  SummaryFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: tag-selector-summary
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+
+          def lambda_handler(event, context):
+              try:
+                  blog_text = event['blog_text']
+                  model_id = event.get('model_id', 'global.anthropic.claude-haiku-4-5-20251001-v1:0')
+                  
+                  bedrock = boto3.client('bedrock-runtime', region_name='us-west-2')
+                  
+                  prompt = f"以下のブログ記事を800文字程度で要約してください:\n\n{blog_text}"
+                  
+                  if 'nova' in model_id.lower():
+                      body = {
+                          "messages": [{"role": "user", "content": [{"text": prompt}]}],
+                          "inferenceConfig": {"temperature": 0.1}
+                      }
+                      response = bedrock.invoke_model(modelId=model_id, body=json.dumps(body))
+                      response_body = json.loads(response['body'].read())
+                      summary_text = response_body['output']['message']['content'][0]['text']
+                      cache_info = {
+                          'input_tokens': response_body['usage']['inputTokens'],
+                          'output_tokens': response_body['usage']['outputTokens']
+                      }
+                  else:
+                      # Claude fallback
+                      body = {
+                          "anthropic_version": "bedrock-2023-05-31",
+                          "max_tokens": 8000,
+                          "messages": [{"role": "user", "content": prompt}]
+                      }
+                      response = bedrock.invoke_model(modelId='anthropic.claude-3-haiku-20240307-v1:0', body=json.dumps(body))
+                      response_body = json.loads(response['body'].read())
+                      summary_text = response_body['content'][0]['text']
+                      cache_info = {
+                          'input_tokens': response_body['usage']['input_tokens'],
+                          'output_tokens': response_body['usage']['output_tokens']
+                      }
+                  
+                  return {'summary_text': summary_text, 'cache_info': cache_info}
+              except Exception as e:
+                  raise Exception(f"Summary failed: {str(e)}")
+
+  # Tags Function
+  TagsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: tag-selector-tags
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      Environment:
+        Variables:
+          CONTENTFUL_SPACE_ID: !Ref ContentfulSpaceId
+          CONTENTFUL_ACCESS_TOKEN: !Ref ContentfulAccessToken
+      Code:
+        ZipFile: |
+          import json
+          import urllib.request
+          import urllib.parse
+          import os
+
+          def lambda_handler(event, context):
+              try:
+                  space_id = os.environ['CONTENTFUL_SPACE_ID']
+                  access_token = os.environ['CONTENTFUL_ACCESS_TOKEN']
+                  
+                  params = {
+                      'access_token': access_token,
+                      'content_type': 'blogTags',
+                      'limit': '1000'
+                  }
+                  
+                  url = f"https://cdn.contentful.com/spaces/{space_id}/entries?" + urllib.parse.urlencode(params)
+                  
+                  with urllib.request.urlopen(url) as response:
+                      data = json.loads(response.read().decode())
+                  
+                  tags_data = []
+                  for item in data['items']:
+                      fields = item['fields']
+                      tags_data.append({
+                          'name': fields.get('name', ''),
+                          'description': fields.get('description', ''),
+                          'category': fields.get('category', '')
+                      })
+                  
+                  return {'tags_data': tags_data}
+              except Exception as e:
+                  raise Exception(f"Failed to get tags: {str(e)}")
+
+  # Recommendation Function
+  RecommendationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: tag-selector-recommendation
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import re
+
+          def lambda_handler(event, context):
+              try:
+                  # Step Functions形式の入力を処理
+                  if 'article' in event and 'tags' in event:
+                      # Step Functions経由
+                      article_data = event['article']['Payload']
+                      tags_data = event['tags']['Payload']['tags_data']
+                      model_id = event.get('model_id', 'global.anthropic.claude-haiku-4-5-20251001-v1:0')
+                      
+                      # 要約があるかチェック
+                      if 'summary' in event and event['summary'].get('Payload'):
+                          text = event['summary']['Payload']['summary_text']
+                      else:
+                          text = article_data['blog_text']
+                  else:
+                      # 直接呼び出し
+                      text = event.get('text') or event.get('fallback_text')
+                      tags_data = event['tags_data']
+                      model_id = event.get('model_id', 'global.anthropic.claude-haiku-4-5-20251001-v1:0')
+                  
+                  # Simple tag filtering
+                  filtered_tags = []
+                  text_lower = text.lower()
+                  for tag in tags_data:
+                      tag_name = tag['name'].lower()
+                      if any(keyword in text_lower for keyword in tag_name.split()):
+                          filtered_tags.append(tag)
+                  
+                  if len(filtered_tags) > 20:
+                      filtered_tags = filtered_tags[:20]
+                  
+                  bedrock = boto3.client('bedrock-runtime', region_name='us-west-2')
+                  
+                  tag_list = "\n".join([f"- {tag['name']}: {tag.get('description', '')}" for tag in filtered_tags])
+                  prompt = f"以下の記事に最適なタグを5個選んでください:\n\n記事内容:\n{text[:2000]}\n\n利用可能なタグ:\n{tag_list}\n\nJSON形式で回答してください:\n{{\"selected_tags\": [\"タグ1\", \"タグ2\", \"タグ3\", \"タグ4\", \"タグ5\"]}}"
+                  
+                  if 'nova' in model_id.lower():
+                      body = {
+                          "messages": [{"role": "user", "content": [{"text": prompt}]}],
+                          "inferenceConfig": {"temperature": 0.1}
+                      }
+                      response = bedrock.invoke_model(modelId=model_id, body=json.dumps(body))
+                      response_body = json.loads(response['body'].read())
+                      result_text = response_body['output']['message']['content'][0]['text']
+                      cache_info = {
+                          'input_tokens': response_body['usage']['inputTokens'],
+                          'output_tokens': response_body['usage']['outputTokens']
+                      }
+                  else:
+                      # Claude fallback
+                      body = {
+                          "anthropic_version": "bedrock-2023-05-31",
+                          "max_tokens": 8000,
+                          "messages": [{"role": "user", "content": prompt}]
+                      }
+                      response = bedrock.invoke_model(modelId='anthropic.claude-3-haiku-20240307-v1:0', body=json.dumps(body))
+                      response_body = json.loads(response['body'].read())
+                      result_text = response_body['content'][0]['text']
+                      cache_info = {
+                          'input_tokens': response_body['usage']['input_tokens'],
+                          'output_tokens': response_body['usage']['output_tokens']
+                      }
+                  
+                  # Extract JSON
+                  json_match = re.search(r'\{[^}]*"selected_tags"[^}]*\}', result_text)
+                  if json_match:
+                      selected_data = json.loads(json_match.group())
+                      selected_tags = selected_data.get('selected_tags', [])
+                  else:
+                      selected_tags = [tag['name'] for tag in filtered_tags[:5]]
+                  
+                  return {
+                      'selected_tags': selected_tags,
+                      'cache_info': cache_info
+                  }
+              except Exception as e:
+                  raise Exception(f"Recommendation failed: {str(e)}")
+
+  # Final Output Formatter Function
+  OutputFormatterFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: tag-selector-output-formatter
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import json
+
+          def lambda_handler(event, context):
+              try:
+                  # 並列実行結果を取得
+                  parallel_results = event.get('parallel_results', [])
+                  tag_result = parallel_results[0]['Payload'] if len(parallel_results) > 0 else {}
+                  snippet_result = parallel_results[1]['Payload'] if len(parallel_results) > 1 else {}
+                  
+                  # 記事データを取得
+                  article_data = event.get('article', {}).get('Payload', {})
+                  summary_data = event.get('summary', {}).get('Payload', {})
+                  
+                  # 要約文章を決定（要約があれば要約、なければ記事の最初の200文字）
+                  if summary_data and summary_data.get('summary_text'):
+                      summary_text = summary_data['summary_text']
+                  else:
+                      blog_text = article_data.get('blog_text', '')
+                      summary_text = blog_text[:200] + "..." if len(blog_text) > 200 else blog_text
+                  
+                  # コスト情報を詳細に分解
+                  summary_cost = summary_data.get('cache_info', {}) if summary_data else {}
+                  tag_cost = tag_result.get('cache_info', {})
+                  snippet_cost = snippet_result.get('cache_info', {})
+                  
+                  # 合算コスト計算
+                  total_input_tokens = (
+                      summary_cost.get('input_tokens', 0) + 
+                      tag_cost.get('input_tokens', 0) + 
+                      snippet_cost.get('input_tokens', 0)
+                  )
+                  total_output_tokens = (
+                      summary_cost.get('output_tokens', 0) + 
+                      tag_cost.get('output_tokens', 0) + 
+                      snippet_cost.get('output_tokens', 0)
+                  )
+                  
+                  # 価格設定（Step Functionsから取得）
+                  cost_params = event.get('cost_params', {})
+                  input_price = cost_params.get('input_price_per_million', 0.25)
+                  output_price = cost_params.get('output_price_per_million', 1.25)
+                  usd_to_jpy = cost_params.get('usd_to_jpy', 150)
+                  
+                  def calculate_tokens_only(input_tokens, output_tokens):
+                      return {
+                          'input_tokens': input_tokens,
+                          'output_tokens': output_tokens
+                      }
+                  
+                  def calculate_cost_only(input_tokens, output_tokens):
+                      input_cost = (input_tokens / 1000000) * input_price * usd_to_jpy
+                      output_cost = (output_tokens / 1000000) * output_price * usd_to_jpy
+                      return {
+                          'input_tokens': input_tokens,
+                          'output_tokens': output_tokens,
+                          'input_cost_jpy': round(input_cost, 4),
+                          'output_cost_jpy': round(output_cost, 4),
+                          'total_cost_jpy': round(input_cost + output_cost, 4)
+                      }
+                  
+                  # 各処理のトークン数のみ
+                  summary_tokens = calculate_tokens_only(
+                      summary_cost.get('input_tokens', 0),
+                      summary_cost.get('output_tokens', 0)
+                  ) if summary_data else None
+                  
+                  tag_tokens = calculate_tokens_only(
+                      tag_cost.get('input_tokens', 0),
+                      tag_cost.get('output_tokens', 0)
+                  )
+                  
+                  snippet_tokens = calculate_tokens_only(
+                      snippet_cost.get('input_tokens', 0),
+                      snippet_cost.get('output_tokens', 0)
+                  )
+                  
+                  # 合算コスト（JPY表示）
+                  total_cost_info = calculate_cost_only(total_input_tokens, total_output_tokens)
+                  
+                  # 最終出力を構築
+                  result = {
+                      'title': article_data.get('title', ''),
+                      'summary': summary_text,
+                      'snippet': snippet_result.get('snippet', ''),
+                      'selected_tags': tag_result.get('selected_tags', []),
+                      'cost_breakdown': {
+                          'summary': summary_tokens,
+                          'tag_recommendation': tag_tokens,
+                          'snippet_generation': snippet_tokens,
+                          'total': total_cost_info
+                      }
+                  }
+                  
+                  return result
+                  
+              except Exception as e:
+                  return {
+                      'error': f"Output formatting failed: {str(e)}",
+                      'title': '',
+                      'summary': '',
+                      'snippet': '',
+                      'selected_tags': [],
+                      'cost_breakdown': {
+                          'summary': None,
+                          'tag_recommendation': {'input_tokens': 0, 'output_tokens': 0},
+                          'snippet_generation': {'input_tokens': 0, 'output_tokens': 0},
+                          'total': {'input_tokens': 0, 'output_tokens': 0, 'input_cost_jpy': 0, 'output_cost_jpy': 0, 'total_cost_jpy': 0}
+                      }
+                  }
+
+  # Snippet Generator Function
+  SnippetGeneratorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: tag-selector-snippet-generator
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import re
+          import collections
+
+          def lambda_handler(event, context):
+              try:
+                  title = event.get('title', '')
+                  content = event.get('content', '')
+                  model_id = event.get('model_id', 'global.anthropic.claude-haiku-4-5-20251001-v1:0')
+                  
+                  if not title and not content:
+                      raise ValueError("title or content is required")
+                  
+                  full_text = f"{title}\n\n{content}" if title and content else (title or content)
+                  snippet_text, cache_info = generate_snippet_with_ai(full_text, model_id, title)
+                  
+                  return {
+                      'snippet': snippet_text,
+                      'cache_info': cache_info,
+                      'model_id': model_id
+                  }
+              except Exception as e:
+                  raise Exception(f"Snippet generation failed: {str(e)}")
+
+          def extract_keywords(text, title=""):
+              combined_text = f"{title} {text}"
+              tech_terms = re.findall(r'[A-Z][a-zA-Z]+|[ぁ-んァ-ヶー一-龯]{2,8}', combined_text)
+              english_words = re.findall(r'[A-Za-z]{3,}', combined_text)
+              japanese_words = re.findall(r'[ぁ-んァ-ヶー一-龯]{2,6}', combined_text)
+              
+              all_keywords = tech_terms + english_words + japanese_words
+              stop_words = {
+                  'です', 'ます', 'した', 'する', 'ある', 'いる', 'なる', 'この', 'その',
+                  'から', 'まで', 'より', 'ため', 'について', 'として', 'による', 'こと',
+                  'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can', 'had'
+              }
+              
+              filtered_keywords = [kw.lower() for kw in all_keywords if len(kw) > 1 and kw.lower() not in stop_words]
+              keyword_counts = collections.Counter(filtered_keywords)
+              
+              unique_keywords = []
+              for keyword, count in keyword_counts.most_common(20):
+                  if keyword not in unique_keywords:
+                      unique_keywords.append(keyword)
+              return unique_keywords[:8]
+
+          def extract_conclusion_content(text):
+              conclusion_patterns = [
+                  r'##\s*まとめ[\s\S]*?(?=\n##|\n#|$)',
+                  r'##\s*最後に[\s\S]*?(?=\n##|\n#|$)', 
+                  r'まとめ\n\n[\s\S]*?(?=\n\n[^\n]|\n##|$)',
+              ]
+              
+              conclusion_text = ""
+              for pattern in conclusion_patterns:
+                  matches = re.findall(pattern, text, re.IGNORECASE)
+                  if matches:
+                      conclusion_text = matches[-1].strip()
+                      break
+              
+              if not conclusion_text:
+                  paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
+                  if len(paragraphs) > 2:
+                      conclusion_text = paragraphs[-1]
+              return conclusion_text
+
+          def format_two_sentence_snippet(text):
+              # テキストをクリーンアップ
+              cleaned_text = text.strip()
+              
+              # プロンプト形式の出力を処理
+              cleaned_text = re.sub(r'^第[12]文[（(][^）)]*[）)][：:]?\s*', '', cleaned_text)
+              cleaned_text = re.sub(r'\n第[12]文[（(][^）)]*[）)][：:]?\s*', '', cleaned_text)
+              
+              # 160文字前後に調整（柔軟に）
+              if len(cleaned_text) > 180:
+                  # 文の境界で切り詰め
+                  sentences = re.split(r'[。！？]', cleaned_text)
+                  result = ""
+                  for sentence in sentences:
+                      if sentence.strip():
+                          test_result = result + sentence.strip() + "。"
+                          if len(test_result) <= 170:
+                              result = test_result
+                          else:
+                              break
+                  
+                  if result:
+                      return result
+                  else:
+                      # 単純に切り詰め
+                      return cleaned_text[:157] + "..."
+              
+              # 文末処理
+              if cleaned_text and not cleaned_text.endswith(('。', '！', '？', '.')):
+                  cleaned_text += "。"
+              
+              return cleaned_text
+
+          def generate_snippet_with_ai(text, model_id, title=""):
+              bedrock = boto3.client('bedrock-runtime', region_name='us-west-2')
+              
+              keywords = extract_keywords(text, title)
+              keywords_text = "、".join(keywords[:8])
+              conclusion = extract_conclusion_content(text)
+              
+              prompt_parts = [
+                  f"タイトル: {title}",
+                  "",
+                  "要件:",
+                  "- 160文字前後を目安（必須ではない）",
+                  "- 文数は自由（1文でも複数文でも可）",
+                  "",
+                  "優先順位:",
+                  "1. タイトルとの連続性・補足説明を最優先",
+                  "2. 記事のまとめ・結論内容を反映", 
+                  "3. 重要なキーワードを自然に含める",
+                  "4. SEO効果と検索結果での理解促進",
+                  "",
+                  f"- 主要キーワード: {keywords_text}",
+                  "- 検索ユーザーが記事内容を適切に理解できる説明",
+                  "- タイトルで言及されていない価値・詳細を補完",
+                  ""
+              ]
+              
+              if conclusion:
+                  prompt_parts.extend([
+                      "記事の結論・まとめ:",
+                      conclusion[:500],
+                      "",
+                      "記事全体:",
+                      text[:1500]
+                  ])
+              else:
+                  prompt_parts.extend([
+                      "記事内容:",
+                      text[:2000]
+                  ])
+              
+              prompt_parts.extend([
+                  "",
+                  "タイトルを補完し、記事内容の理解を促進するスニペット:"
+              ])
+              prompt = "\n".join(prompt_parts)
+              
+              if 'nova' in model_id.lower():
+                  body = {
+                      "messages": [{"role": "user", "content": [{"text": prompt}]}],
+                      "inferenceConfig": {"temperature": 0.3, "maxTokens": 300}
+                  }
+                  response = bedrock.invoke_model(modelId=model_id, body=json.dumps(body))
+                  response_body = json.loads(response['body'].read())
+                  
+                  snippet_text = response_body['output']['message']['content'][0]['text'].strip()
+                  cache_info = {
+                      'input_tokens': response_body['usage']['inputTokens'],
+                      'output_tokens': response_body['usage']['outputTokens']
+                  }
+              else:
+                  body = {
+                      "anthropic_version": "bedrock-2023-05-31",
+                      "max_tokens": 300,
+                      "temperature": 0.3,
+                      "messages": [{"role": "user", "content": prompt}]
+                  }
+                  response = bedrock.invoke_model(
+                      modelId='anthropic.claude-3-haiku-20240307-v1:0', 
+                      body=json.dumps(body)
+                  )
+                  response_body = json.loads(response['body'].read())
+                  
+                  snippet_text = response_body['content'][0]['text'].strip()
+                  cache_info = {
+                      'input_tokens': response_body['usage']['input_tokens'],
+                      'output_tokens': response_body['usage']['output_tokens']
+                  }
+              
+              snippet_text = format_two_sentence_snippet(snippet_text)
+              return snippet_text, cache_info
+
+  # Function URL
+  MainFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt MainFunction.Arn
+      AuthType: NONE
+      Cors:
+        AllowCredentials: false
+        AllowMethods: [GET, POST]
+        AllowOrigins: ["*"]
+
+  MainFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MainFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+Outputs:
+  LambdaURL:
+    Description: 'Lambda Function URL'
+    Value: !GetAtt MainFunctionUrl.FunctionUrl
+  StepFunctionsArn:
+    Description: 'Step Functions State Machine ARN'
+    Value: !Ref TagSelectorStateMachine

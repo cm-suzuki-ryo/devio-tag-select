@@ -1,0 +1,379 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Tag Selector with Step Functions Express Workflow'
+
+Parameters:
+  CloudFrontSecretHeader:
+    Type: String
+    Description: 'Secret header value for CloudFront authentication'
+    Default: 'MySecretValue123'
+    NoEcho: true
+
+Resources:
+  # IAM Role for Step Functions
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaInvokePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt ContentfulGetterFunction.Arn
+                  - !GetAtt SummaryFunction.Arn
+                  - !GetAtt RecommendationFunction.Arn
+
+  # Step Functions State Machine
+  TagSelectorStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: tag-selector-workflow
+      StateMachineType: EXPRESS
+      RoleArn: !GetAtt StepFunctionsRole.Arn
+      LoggingConfiguration:
+        Level: ERROR
+        IncludeExecutionData: false
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt StepFunctionsLogGroup.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "Tag Selector Workflow with Express Step Functions",
+          "StartAt": "GetArticle",
+          "States": {
+            "GetArticle": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${ContentfulGetterFunction}",
+                "Payload": {
+                  "slug.$": "$.slug",
+                  "model_id.$": "$.model_id"
+                }
+              },
+              "ResultPath": "$.article",
+              "Next": "CheckTextLength"
+            },
+            "CheckTextLength": {
+              "Type": "Choice",
+              "Choices": [{
+                "Variable": "$.article.Payload.text_length",
+                "NumericGreaterThan": 10000,
+                "Next": "SummarizeText"
+              }],
+              "Default": "RecommendTags"
+            },
+            "SummarizeText": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${SummaryFunction}",
+                "Payload": {
+                  "blog_text.$": "$.article.Payload.blog_text",
+                  "model_id.$": "$.model_id"
+                }
+              },
+              "ResultPath": "$.summary",
+              "Next": "RecommendTags"
+            },
+            "RecommendTags": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${RecommendationFunction}",
+                "Payload": {
+                  "text.$": "$.summary.Payload.summary_text",
+                  "model_id.$": "$.model_id",
+                  "fallback_text.$": "$.article.Payload.blog_text"
+                }
+              },
+              "ResultSelector": {
+                "result.$": "$.Payload"
+              },
+              "End": true
+            }
+          }
+        }
+
+  # CloudWatch Log Group for Step Functions
+  StepFunctionsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/stepfunctions/tag-selector-workflow
+      RetentionInDays: 7
+
+  # Lambda Execution Role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: BedrockInvokePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource: '*'
+        - PolicyName: StepFunctionsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - states:StartSyncExecution
+                Resource: !Ref TagSelectorStateMachine
+
+  # Main Lambda Function (Step Functions trigger)
+  MainFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: tag-selector-main-sf
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      Environment:
+        Variables:
+          STATE_MACHINE_ARN: !Ref TagSelectorStateMachine
+          CLOUDFRONT_SECRET_HEADER: !Ref CloudFrontSecretHeader
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import uuid
+
+          def lambda_handler(event, context):
+              try:
+                  # CloudFront認証
+                  expected_secret = os.environ.get('CLOUDFRONT_SECRET_HEADER')
+                  if expected_secret:
+                      headers = event.get('headers', {})
+                      cloudfront_secret = headers.get('x-cloudfront-secret') or headers.get('X-CloudFront-Secret')
+                      if not cloudfront_secret or cloudfront_secret != expected_secret:
+                          return {
+                              'statusCode': 403,
+                              'body': json.dumps({'error': 'Access denied - CloudFront access required'})
+                          }
+
+                  # パラメータ取得
+                  if event.get('httpMethod'):
+                      if event['httpMethod'] == 'GET':
+                          params = event.get('queryStringParameters') or {}
+                      else:
+                          params = json.loads(event.get('body', '{}'))
+                  else:
+                      params = event
+
+                  slug = params.get('slug')
+                  model_id = params.get('model_id', 'us.amazon.nova-lite-v1:0')
+
+                  if not slug:
+                      return {
+                          'statusCode': 400,
+                          'body': json.dumps({'error': 'slug parameter is required'})
+                      }
+
+                  # Step Functions実行
+                  stepfunctions = boto3.client('stepfunctions')
+                  execution_name = f"tag-selector-{uuid.uuid4().hex[:8]}"
+                  
+                  response = stepfunctions.start_sync_execution(
+                      stateMachineArn=os.environ['STATE_MACHINE_ARN'],
+                      name=execution_name,
+                      input=json.dumps({
+                          'slug': slug,
+                          'model_id': model_id
+                      })
+                  )
+
+                  if response['status'] == 'SUCCEEDED':
+                      result = json.loads(response['output'])
+                      return {
+                          'statusCode': 200,
+                          'headers': {'Content-Type': 'application/json'},
+                          'body': json.dumps(result['result'])
+                      }
+                  else:
+                      return {
+                          'statusCode': 500,
+                          'body': json.dumps({
+                              'error': 'Step Functions execution failed',
+                              'details': response.get('error', 'Unknown error')
+                          })
+                      }
+
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({'error': str(e)})
+                  }
+
+  # Contentful Getter Function
+  ContentfulGetterFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: tag-selector-contentful-getter
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      Environment:
+        Variables:
+          CONTENTFUL_SPACE_ID: 'your-space-id'
+          CONTENTFUL_ACCESS_TOKEN: 'your-access-token'
+      Code:
+        ZipFile: |
+          import json
+          import requests
+          import os
+
+          def lambda_handler(event, context):
+              try:
+                  slug = event['slug']
+                  model_id = event.get('model_id', 'us.amazon.nova-lite-v1:0')
+                  
+                  # Contentful API呼び出し
+                  space_id = os.environ['CONTENTFUL_SPACE_ID']
+                  access_token = os.environ['CONTENTFUL_ACCESS_TOKEN']
+                  
+                  url = f"https://cdn.contentful.com/spaces/{space_id}/entries"
+                  params = {
+                      'access_token': access_token,
+                      'content_type': 'blogPost',
+                      'fields.slug': slug,
+                      'limit': 1
+                  }
+                  
+                  response = requests.get(url, params=params)
+                  response.raise_for_status()
+                  data = response.json()
+                  
+                  if not data['items']:
+                      raise Exception(f"Article not found: {slug}")
+                  
+                  item = data['items'][0]['fields']
+                  title = item.get('title', '')
+                  content = item.get('content', '')
+                  blog_text = f"{title}\n\n{content}"
+                  
+                  return {
+                      'blog_text': blog_text,
+                      'text_length': len(blog_text),
+                      'model_id': model_id
+                  }
+                  
+              except Exception as e:
+                  raise Exception(f"Failed to get article: {str(e)}")
+
+  # Summary Function (existing)
+  SummaryFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: tag-selector-summary-sf
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      Environment:
+        Variables:
+          MODEL_ID: 'us.amazon.nova-lite-v1:0'
+      Code:
+        ZipFile: |
+          # Existing summary_lambda.py code here
+          def lambda_handler(event, context):
+              return {'summary_text': 'Summary placeholder'}
+
+  # Recommendation Function (existing)
+  RecommendationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: tag-selector-recommendation-sf
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      Environment:
+        Variables:
+          MODEL_ID: 'us.amazon.nova-lite-v1:0'
+      Code:
+        ZipFile: |
+          # Existing tag_selector_lambda.py code here
+          def lambda_handler(event, context):
+              return {'tags': ['tag1', 'tag2']}
+
+  # Function URL
+  MainFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt MainFunction.Arn
+      AuthType: NONE
+      Cors:
+        AllowCredentials: false
+        AllowMethods: [GET, POST]
+        AllowOrigins: ["*"]
+
+  MainFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MainFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+  # CloudFront Distribution
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Origins:
+          - Id: LambdaOrigin
+            DomainName: !Select [2, !Split ["/", !GetAtt MainFunctionUrl.FunctionUrl]]
+            CustomOriginConfig:
+              HTTPPort: 443
+              OriginProtocolPolicy: https-only
+            OriginCustomHeaders:
+              - HeaderName: X-CloudFront-Secret
+                HeaderValue: !Ref CloudFrontSecretHeader
+        DefaultCacheBehavior:
+          TargetOriginId: LambdaOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+          CachedMethods: [GET, HEAD]
+          ForwardedValues:
+            QueryString: true
+            Headers: ["*"]
+
+Outputs:
+  StepFunctionsArn:
+    Description: 'Step Functions State Machine ARN'
+    Value: !Ref TagSelectorStateMachine
+  
+  CloudFrontURL:
+    Description: 'CloudFront Distribution URL'
+    Value: !Sub 'https://${CloudFrontDistribution.DomainName}'
+  
+  LambdaURL:
+    Description: 'Lambda Function URL (for testing)'
+    Value: !GetAtt MainFunctionUrl.FunctionUrl

@@ -1,0 +1,67 @@
+{
+  "Comment": "Tag Selector Workflow with Express Step Functions",
+  "StartAt": "GetArticle",
+  "States": {
+    "GetArticle": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${ContentfulGetterFunction}",
+        "Payload": {
+          "slug.$": "$.slug",
+          "model_id.$": "$.model_id"
+        }
+      },
+      "ResultPath": "$.article",
+      "Next": "CheckTextLength",
+      "Retry": [{
+        "ErrorEquals": ["States.TaskFailed"],
+        "IntervalSeconds": 2,
+        "MaxAttempts": 3
+      }]
+    },
+    "CheckTextLength": {
+      "Type": "Choice",
+      "Choices": [{
+        "Variable": "$.article.Payload.text_length",
+        "NumericGreaterThan": 10000,
+        "Next": "SummarizeText"
+      }],
+      "Default": "RecommendTags"
+    },
+    "SummarizeText": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${SummaryFunction}",
+        "Payload": {
+          "blog_text.$": "$.article.Payload.blog_text",
+          "model_id.$": "$.model_id"
+        }
+      },
+      "ResultPath": "$.summary",
+      "Next": "RecommendTags",
+      "Retry": [{
+        "ErrorEquals": ["States.TaskFailed"],
+        "IntervalSeconds": 2,
+        "MaxAttempts": 2
+      }]
+    },
+    "RecommendTags": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${RecommendationFunction}",
+        "Payload": {
+          "text.$": "$.summary.Payload.summary_text",
+          "model_id.$": "$.model_id",
+          "fallback_text.$": "$.article.Payload.blog_text"
+        }
+      },
+      "ResultSelector": {
+        "result.$": "$.Payload"
+      },
+      "End": true
+    }
+  }
+}

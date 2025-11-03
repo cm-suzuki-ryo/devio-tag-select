@@ -203,12 +203,32 @@ Resources:
         Variables:
           SUMMARY_LAMBDA_NAME: !Ref SummaryLambdaFunction
           RECOMMENDATION_LAMBDA_NAME: !Ref TagRecommendationLambdaFunction
+          CONTENTFUL_ACCESS_TOKEN: !Ref ContentfulAccessToken
+          CONTENTFUL_SPACE_ID: !Ref ContentfulSpaceId
           MODEL_ID: !Ref ModelId
       Code:
         ZipFile: |
           import json
           import os
           import boto3
+          import urllib3
+          
+          def get_article_from_contentful(slug):
+              http = urllib3.PoolManager()
+              access_token = os.environ.get('CONTENTFUL_ACCESS_TOKEN')
+              space_id = os.environ.get('CONTENTFUL_SPACE_ID')
+              url = f"https://cdn.contentful.com/spaces/{space_id}/entries?limit=1&fields.slug={slug}&locale=ja&access_token={access_token}&content_type=blogPost&select=fields.content,fields.title"
+              
+              response = http.request('GET', url)
+              data = json.loads(response.data.decode('utf-8'))
+              
+              if data.get('items') and len(data['items']) > 0:
+                  fields = data['items'][0].get('fields', {})
+                  title = fields.get('title', '')
+                  content = fields.get('content', '')
+                  return f"{title}\\n\\n{content}"
+              
+              return None
           
           def lambda_handler(event, context):
               try:
@@ -235,7 +255,17 @@ Resources:
                       params = event
                   
                   blog_text = params.get('blog_text', '')
+                  article_id = params.get('article_id', '')
                   model_id = params.get('model_id', os.environ.get('MODEL_ID'))
+                  
+                  # 記事テキスト取得
+                  if not blog_text and article_id:
+                      blog_text = get_article_from_contentful(article_id)
+                      if not blog_text:
+                          return {
+                              'statusCode': 404,
+                              'body': json.dumps({'error': f'Article not found: {article_id}'})
+                          }
                   
                   lambda_client = boto3.client('lambda')
                   
