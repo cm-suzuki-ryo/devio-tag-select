@@ -47,25 +47,26 @@ curl https://cloudfront-domain/ → 200 OK
 
 ### 📁 **ソースコード構成**
 ```
+cloudformation.yaml                   # メインテンプレート（分離アーキテクチャ）
 lambda-code/
-├── summary_lambda.py              # 要約専用Lambda
-├── tag_selector_lambda.py         # タグ選択専用Lambda
-├── tags_lambda.py                 # タグ取得専用Lambda
-├── enhanced_index.py              # メイン処理（統合版・レガシー）
-├── model_router.py                # モデル振り分け
-├── claude_model.py                # Claude専用処理
-├── nova_model.py                  # Nova専用処理
-├── gpt_model.py                   # GPT専用処理
-├── enhanced_common.py             # 共通関数（MeCab対応）
-└── common.py                      # 価格計算（環境変数ベース）
+├── summary_lambda.py              # 要約専用Lambda（参考）
+├── tag_selector_lambda.py         # タグ選択専用Lambda（参考）
+├── tags_lambda.py                 # タグ取得専用Lambda（参考）
+├── enhanced_index.py              # メイン処理（レガシー・参考）
+├── model_router.py                # モデル振り分け（参考）
+├── claude_model.py                # Claude専用処理（参考）
+├── nova_model.py                  # Nova専用処理（参考）
+├── gpt_model.py                   # GPT専用処理（参考）
+├── enhanced_common.py             # 共通関数（参考）
+└── common.py                      # 価格計算（参考）
 ```
 
-### 🔄 **処理フロー（分離版 + CloudFront）**
+### 🔄 **処理フロー（分離版）**
 ```
-Client → CloudFront → Lambda Function URL → tag-selector-main
-                                         → tag-selector-tags (タグ取得)
-                                         → tag-selector-summary (要約)
-                                         → AI処理 → 結果
+Client → Lambda Function URL → tag-selector-main
+                             → tag-selector-summary (要約)
+                             → tag-selector-recommendation (タグ取得+選択)
+                             → AI処理 → 結果
 ```
 
 ### 🧪 **Dockerテスト**
@@ -165,37 +166,12 @@ cache_info = {
 
 ### 🚀 **デプロイ方法**
 
-#### **分離版（推奨）**
+#### **統一アーキテクチャ（推奨）**
 ```bash
-# カスタムヘッダー付き分離版
+# 分離Lambda版（統一テンプレート）
 aws cloudformation deploy \
-  --template-file separated_cloudformation.yaml \
-  --stack-name tag-selector-separated \
-  --parameter-overrides CloudFrontSecretHeader=YourSecretValue123 \
-  --capabilities CAPABILITY_IAM \
-  --region us-west-2
-```
-
-#### **従来版（レガシー）**
-```bash
-# Claude版（基準実装）
-aws cloudformation deploy \
-  --template-file claude_cloudformation.yaml \
-  --stack-name tag-selector-claude \
-  --capabilities CAPABILITY_IAM \
-  --region us-west-2
-
-# Nova版
-aws cloudformation deploy \
-  --template-file nova_cloudformation.yaml \
-  --stack-name tag-selector-nova \
-  --capabilities CAPABILITY_IAM \
-  --region us-west-2
-
-# GPT版
-aws cloudformation deploy \
-  --template-file gpt_cloudformation.yaml \
-  --stack-name tag-selector-gpt \
+  --template-file cloudformation.yaml \
+  --stack-name tag-selector \
   --capabilities CAPABILITY_IAM \
   --region us-west-2
 ```
