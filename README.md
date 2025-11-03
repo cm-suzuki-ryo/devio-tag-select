@@ -2,6 +2,18 @@
 
 AWS Bedrockを使用したAIベースのブログ記事タグ自動選択システム
 
+## 🏗️ **アーキテクチャ更新 - Lambda分離版**
+
+### **新アーキテクチャ**
+- **要約Lambda**: 記事要約専用（`summary_lambda.py`）
+- **タグ選択Lambda**: タグ選択専用（`tag_selector_lambda.py`）
+- **Lambda間通信**: boto3によるRequestResponse呼び出し
+
+### **分離のメリット**
+- **独立スケーリング**: 要約処理とタグ選択処理を個別にスケール
+- **再利用性**: 要約Lambdaを他の用途でも使用可能
+- **保守性**: 各処理の責任を明確に分離
+
 ## LLM開発者向け技術情報
 
 ### 🏗️ **アーキテクチャ概要**
@@ -15,7 +27,9 @@ AWS Bedrockを使用したAIベースのブログ記事タグ自動選択シス�
 ### 📁 **ソースコード構成**
 ```
 lambda-code/
-├── enhanced_index.py              # メイン処理（統合版）
+├── summary_lambda.py              # 要約専用Lambda
+├── tag_selector_lambda.py         # タグ選択専用Lambda
+├── enhanced_index.py              # メイン処理（統合版・レガシー）
 ├── model_router.py                # モデル振り分け
 ├── claude_model.py                # Claude専用処理
 ├── nova_model.py                  # Nova専用処理
@@ -24,12 +38,36 @@ lambda-code/
 └── common.py                      # 価格計算（環境変数ベース）
 ```
 
-### 🔄 **処理フロー**
+### 🔄 **処理フロー（分離版）**
 1. **記事取得**: Contentful API → `get_article_from_contentful()`
-2. **要約作成**: 長文記事 → `create_summary()` → モデル別実装
+2. **要約Lambda呼び出し**: 長文記事 → boto3 → `summary_lambda.py`
 3. **MeCab処理**: 日本語解析 → `enhanced_pre_filter_tags()` → 200タグ絞り込み
-4. **LLM評価**: タグランキング → `evaluate_tags_with_llm()` → モデル別API
+4. **LLM評価**: タグランキング → `select_tags_with_model()` → モデル別API
 5. **結果統合**: 上位20タグ選択 → 価格計算 → JSON出力
+
+### 🧪 **Dockerテスト**
+
+#### **分離Lambda版テスト**
+```bash
+# 分離Lambda版テスト
+docker build -f Dockerfile.test-separated -t test-separated .
+docker run --rm -e AWS_DEFAULT_REGION=us-west-2 -v ~/.aws:/root/.aws:ro test-separated
+```
+
+#### **従来版テスト（レガシー）**
+```bash
+# Haikuテスト
+docker build -f tests/Dockerfile.haiku-test -t haiku-test .
+docker run --rm -e AWS_DEFAULT_REGION=us-west-2 -v ~/.aws:/root/.aws:ro haiku-test
+
+# Novaテスト
+docker build -f tests/Dockerfile.nova-test -t nova-test .
+docker run --rm -e AWS_DEFAULT_REGION=us-west-2 -v ~/.aws:/root/.aws:ro nova-test
+
+# GPTテスト
+docker build -f tests/Dockerfile.gpt-test -t gpt-test .
+docker run --rm -e AWS_DEFAULT_REGION=us-west-2 -v ~/.aws:/root/.aws:ro gpt-test
+```
 
 ### 🔧 **モデル別API仕様**
 
@@ -142,6 +180,7 @@ aws cloudformation deploy \
 - `USD_TO_JPY`: 為替レート（USD→JPY）
 - `MODEL_ID`: 使用するモデルID
 - `CONTENTFUL_ACCESS_TOKEN`: Contentful API トークン
+- `SUMMARY_LAMBDA_NAME`: 要約Lambda関数名（分離版のみ）
 
 ### 🔍 **開発フロー**
 1. `lambda-code/` でソース変更

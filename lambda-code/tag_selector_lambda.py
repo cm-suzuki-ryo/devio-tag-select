@@ -33,6 +33,22 @@ def call_summary_lambda(article_id=None, blog_text=None, model_id=None):
     body = json.loads(result['body'])
     return body['summary_text'], body['cache_info']
 
+def call_tags_lambda():
+    """タグ取得Lambda関数を呼び出し"""
+    response = lambda_client.invoke(
+        FunctionName=os.environ.get('TAGS_LAMBDA_NAME', 'tag-selector-tags'),
+        InvocationType='RequestResponse',
+        Payload=json.dumps({})
+    )
+    
+    result = json.loads(response['Payload'].read())
+    
+    if result['statusCode'] != 200:
+        raise Exception(f"Tags Lambda error: {result['body']}")
+    
+    body = json.loads(result['body'])
+    return body['tags_data']
+
 def lambda_handler(event, context):
     """タグ選択専用Lambda関数のハンドラー"""
     try:
@@ -55,8 +71,11 @@ def lambda_handler(event, context):
             processing_text = blog_text
             summary_cache_info = {'input_tokens': 0, 'output_tokens': 0}
         
+        # 全タグ取得
+        all_tags = call_tags_lambda()
+        
         # タグ絞り込み
-        filtered_tags, tags_hash = enhanced_pre_filter_tags(processing_text)
+        filtered_tags, tags_hash = enhanced_pre_filter_tags(processing_text, all_tags)
         
         # タグ選択
         selected_tags, ranking_cache_info = select_tags_with_model(
@@ -75,7 +94,7 @@ def lambda_handler(event, context):
             'used_summary': is_long_article
         }
         
-        cost_info = calculate_cost(total_cache_info)
+        cost_info = calculate_cost(model_id, total_cache_info)
         
         return {
             'statusCode': 200,
