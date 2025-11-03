@@ -52,9 +52,27 @@ def call_tags_lambda():
 def lambda_handler(event, context):
     """タグ選択専用Lambda関数のハンドラー"""
     try:
-        # パラメータ取得
-        article_id = event.get('article_id')
-        model_id = event.get('model_id', os.environ.get('MODEL_ID'))
+        # Function URL event handling
+        if 'body' in event and event['body']:
+            if isinstance(event['body'], str):
+                params = json.loads(event['body'])
+            else:
+                params = event['body']
+        else:
+            params = event
+        
+        # Custom header authentication for CloudFront
+        if 'headers' in event:
+            secret_header = event['headers'].get('x-cloudfront-secret') or event['headers'].get('X-CloudFront-Secret')
+            expected_secret = os.environ.get('CLOUDFRONT_SECRET_HEADER')
+            if expected_secret and secret_header != expected_secret:
+                return {
+                    'statusCode': 403,
+                    'body': json.dumps({'error': 'Forbidden'})
+                }
+        
+        article_id = params.get('article_id')
+        model_id = params.get('model_id', os.environ.get('MODEL_ID'))
         
         # 記事取得
         blog_text = get_article_from_contentful(article_id)
@@ -98,6 +116,12 @@ def lambda_handler(event, context):
         
         return {
             'statusCode': 200,
+            'headers': {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Methods': 'POST, OPTIONS',
+                'Access-Control-Allow-Headers': 'Content-Type, X-CloudFront-Secret'
+            },
             'body': json.dumps({
                 'selected_tags': selected_tags,
                 'cost_info': cost_info,
@@ -108,6 +132,12 @@ def lambda_handler(event, context):
     except Exception as e:
         return {
             'statusCode': 500,
+            'headers': {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Methods': 'POST, OPTIONS',
+                'Access-Control-Allow-Headers': 'Content-Type, X-CloudFront-Secret'
+            },
             'body': json.dumps({
                 'error': str(e)
             }, ensure_ascii=False)

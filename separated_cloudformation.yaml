@@ -69,10 +69,10 @@ Resources:
 # --------------------------------------------- #
 # Tags Lambda Function
 # --------------------------------------------- #
-  TagsLambdaFunction:
+  TagRecommendationLambdaFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: tag-selector-tags
+      FunctionName: tag-selector-recommendation
       Runtime: python3.11
       Handler: index.lambda_handler
       Role: !GetAtt LambdaExecutionRole.Arn
@@ -174,8 +174,8 @@ Resources:
         ZipFile: |
           import json
           import os
-          import urllib3
           import boto3
+          import urllib3
           
           def get_article_from_contentful(slug):
               """Contentfulから記事を取得"""
@@ -227,6 +227,67 @@ Resources:
               
               return summary_text, cache_info
 
+          def create_summary_with_nova(blog_text, model_id):
+              """Novaモデルで記事要約を作成"""
+              bedrock = boto3.client('bedrock-runtime')
+              
+              prompt = f"あなたは記事要約の専門家です。以下のブログ記事を1000文字程度で要約してください。技術的なキーワードや重要な概念は必ず含めてください：\n\n{blog_text}"
+              
+              body = {
+                  "messages": [{"role": "user", "content": [{"text": prompt}]}],
+                  "inferenceConfig": {"temperature": 0}
+              }
+              
+              response = bedrock.invoke_model(modelId=model_id, body=json.dumps(body))
+              response_body = json.loads(response['body'].read())
+              
+              summary_text = response_body['output']['message']['content'][0]['text']
+              usage = response_body.get('usage', {})
+              
+              cache_info = {
+                  'input_tokens': usage.get('inputTokens', 0),
+                  'output_tokens': usage.get('outputTokens', 0)
+              }
+              
+              return summary_text, cache_info
+
+          def create_summary_with_gpt(blog_text, model_id):
+              """GPT-OSSモデルで記事要約を作成"""
+              bedrock = boto3.client('bedrock-runtime')
+              
+              body = {
+                  "messages": [
+                      {"role": "system", "content": "あなたは記事要約の専門家です。"},
+                      {"role": "user", "content": f"以下のブログ記事を1000文字程度で要約してください。技術的なキーワードや重要な概念は必ず含めてください：\n\n{blog_text}"}
+                  ],
+                  "max_tokens": 8192,
+                  "temperature": 0
+              }
+              
+              response = bedrock.invoke_model(modelId=model_id, body=json.dumps(body))
+              response_body = json.loads(response['body'].read())
+              
+              summary_text = response_body['choices'][0]['message']['content']
+              usage = response_body.get('usage', {})
+              
+              cache_info = {
+                  'input_tokens': usage.get('prompt_tokens', 0),
+                  'output_tokens': usage.get('completion_tokens', 0)
+              }
+              
+              return summary_text, cache_info
+
+          def create_summary_by_model(blog_text, model_id):
+              """モデルに応じて要約を作成"""
+              if 'claude' in model_id.lower():
+                  return create_summary_with_claude(blog_text, model_id)
+              elif 'nova' in model_id.lower():
+                  return create_summary_with_nova(blog_text, model_id)
+              elif 'gpt' in model_id.lower():
+                  return create_summary_with_gpt(blog_text, model_id)
+              else:
+                  raise ValueError(f"Unsupported model for summary: {model_id}")
+
           def lambda_handler(event, context):
               """要約専用Lambda関数のハンドラー"""
               try:
@@ -242,7 +303,7 @@ Resources:
                       raise ValueError("article_id or blog_text is required")
                   
                   # 要約作成
-                  summary_text, cache_info = create_summary_with_claude(blog_text, model_id)
+                  summary_text, cache_info = create_summary_by_model(blog_text, model_id)
                   
                   return {
                       'statusCode': 200,
@@ -282,8 +343,7 @@ Resources:
           OUTPUT_PRICE_PER_MILLION: '1.25'
           USD_TO_JPY: '150'
           SUMMARY_LAMBDA_NAME: !Ref SummaryLambdaFunction
-          TAGS_LAMBDA_NAME: !Ref TagsLambdaFunction
-          CLOUDFRONT_SECRET_HEADER: !Ref CloudFrontSecretHeader
+          TAGS_LAMBDA_NAME: !Ref TagRecommendationLambdaFunction
       Code:
         ZipFile: |
           import json
@@ -420,31 +480,44 @@ Resources:
           
           def lambda_handler(event, context):
               try:
-                  # Custom header validation for CloudFront access
-                  expected_secret = os.environ.get('CLOUDFRONT_SECRET_HEADER')
-                  if expected_secret:
-                      headers = event.get('headers', {})
-                      # Check both lowercase and original case headers
-                      cloudfront_secret = headers.get('x-cloudfront-secret') or headers.get('X-CloudFront-Secret')
-                      if not cloudfront_secret or cloudfront_secret != expected_secret:
-                          return {
-                              'statusCode': 403,
-                              'body': json.dumps({'error': 'Access denied - CloudFront access required'})
-                          }
+                  # Function URL event handling - CloudFront compatible
+                  params = {}
                   
-                  # Function URL event handling
-                  if 'body' in event and event['body']:
-                      if isinstance(event['body'], str):
-                          params = json.loads(event['body'])
-                      else:
-                          params = event['body']
-                  else:
+                  # Query string parameters (GET request)
+                  if event.get('queryStringParameters'):
+                      params.update(event['queryStringParameters'])
+                  
+                  # Body parameters (POST request)
+                  if event.get('body'):
+                      try:
+                          if isinstance(event['body'], str):
+                              body_params = json.loads(event['body'])
+                          else:
+                              body_params = event['body']
+                          params.update(body_params)
+                      except:
+                          pass
+                  
+                  # Direct Lambda invocation
+                  if not params and 'article_id' in event or 'blog_text' in event:
                       params = event
                   
                   article_id = params.get('article_id')
+                  blog_text = params.get('blog_text')
                   model_id = params.get('model_id', os.environ.get('MODEL_ID'))
                   
-                  blog_text = get_article_from_contentful(article_id)
+                  # 記事テキスト取得
+                  if not blog_text and article_id:
+                      blog_text = get_article_from_contentful(article_id)
+                  
+                  if not blog_text:
+                      return {
+                          'statusCode': 400,
+                          'body': json.dumps({
+                              'error': 'article_id or blog_text is required'
+                          }, ensure_ascii=False)
+                      }
+                  
                   is_long_article = len(blog_text) > 8000
                   
                   if is_long_article:
