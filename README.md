@@ -2,33 +2,55 @@
 
 AWS Bedrockを使用したAIベースのブログ記事タグ自動選択システム
 
-## 🏗️ **アーキテクチャ更新 - Lambda分離版**
+## 🏗️ **アーキテクチャ更新 - Lambda分離版 + CloudFront保護**
 
 ### **新アーキテクチャ**
 - **要約Lambda**: 記事要約専用（`summary_lambda.py`）
+- **タグ取得Lambda**: タグ取得専用（`tags_lambda.py`）
 - **タグ選択Lambda**: タグ選択専用（`tag_selector_lambda.py`）
+- **CloudFront**: グローバル配信 + カスタムヘッダー認証
 - **Lambda間通信**: boto3によるRequestResponse呼び出し
 
 ### **分離のメリット**
 - **独立スケーリング**: 要約処理とタグ選択処理を個別にスケール
 - **再利用性**: 要約Lambdaを他の用途でも使用可能
 - **保守性**: 各処理の責任を明確に分離
+- **セキュリティ**: CloudFrontカスタムヘッダーによる保護
+- **パフォーマンス**: エッジキャッシュによる高速化
+
+## 🔒 **セキュリティ機能**
+
+### **CloudFrontカスタムヘッダー認証**
+- **直接アクセス保護**: Lambda Function URLへの直接アクセスをブロック
+- **カスタムヘッダー**: `X-CloudFront-Secret`による認証
+- **パラメータ化**: CloudFormationデプロイ時に秘密値を設定可能
+- **完全保護**: 秘密値を知らない限りアクセス不可
+
+```bash
+# 直接アクセス（ブロック）
+curl https://lambda-url/ → 403 Forbidden
+
+# CloudFront経由（許可）  
+curl https://cloudfront-domain/ → 200 OK
+```
 
 ## LLM開発者向け技術情報
 
 ### 🏗️ **アーキテクチャ概要**
 - **言語**: Python 3.11
 - **AWS リージョン**: us-west-2（オレゴン）
-- **AWS サービス**: Lambda, Bedrock, CloudFormation
+- **AWS サービス**: Lambda, Bedrock, CloudFront, CloudFormation
 - **外部API**: Contentful
 - **形態素解析**: MeCab（フォールバック付き）
 - **価格計算**: 環境変数ベース
+- **セキュリティ**: カスタムヘッダー認証
 
 ### 📁 **ソースコード構成**
 ```
 lambda-code/
 ├── summary_lambda.py              # 要約専用Lambda
 ├── tag_selector_lambda.py         # タグ選択専用Lambda
+├── tags_lambda.py                 # タグ取得専用Lambda
 ├── enhanced_index.py              # メイン処理（統合版・レガシー）
 ├── model_router.py                # モデル振り分け
 ├── claude_model.py                # Claude専用処理
@@ -38,12 +60,13 @@ lambda-code/
 └── common.py                      # 価格計算（環境変数ベース）
 ```
 
-### 🔄 **処理フロー（分離版）**
-1. **記事取得**: Contentful API → `get_article_from_contentful()`
-2. **要約Lambda呼び出し**: 長文記事 → boto3 → `summary_lambda.py`
-3. **MeCab処理**: 日本語解析 → `enhanced_pre_filter_tags()` → 200タグ絞り込み
-4. **LLM評価**: タグランキング → `select_tags_with_model()` → モデル別API
-5. **結果統合**: 上位20タグ選択 → 価格計算 → JSON出力
+### 🔄 **処理フロー（分離版 + CloudFront）**
+```
+Client → CloudFront → Lambda Function URL → tag-selector-main
+                                         → tag-selector-tags (タグ取得)
+                                         → tag-selector-summary (要約)
+                                         → AI処理 → 結果
+```
 
 ### 🧪 **Dockerテスト**
 
@@ -137,10 +160,23 @@ cache_info = {
 - **基準実装**: Claude Haiku版のコード構造
 - **API差異対応**: リクエスト・レスポンス処理部分のみモデル別に修正
 - **共通処理**: MeCab処理、価格計算、エラーハンドリングは統一
+- **セキュリティ**: カスタムヘッダー認証による保護
 - **テスト完了**: 全3モデルでus-west-2リージョンにて動作確認済み
 
 ### 🚀 **デプロイ方法**
 
+#### **分離版（推奨）**
+```bash
+# カスタムヘッダー付き分離版
+aws cloudformation deploy \
+  --template-file separated_cloudformation.yaml \
+  --stack-name tag-selector-separated \
+  --parameter-overrides CloudFrontSecretHeader=YourSecretValue123 \
+  --capabilities CAPABILITY_IAM \
+  --region us-west-2
+```
+
+#### **従来版（レガシー）**
 ```bash
 # Claude版（基準実装）
 aws cloudformation deploy \
@@ -166,6 +202,15 @@ aws cloudformation deploy \
 
 ### 🧪 **デプロイ後テスト結果 (us-west-2)**
 
+#### **分離版 + CloudFront**
+| 項目 | 結果 | 詳細 |
+|------|------|------|
+| **CloudFront URL** | ✅ 動作確認済み | `https://d2wfh8k3k94bjx.cloudfront.net` |
+| **直接アクセス** | ✅ ブロック成功 | 403 Forbidden |
+| **処理時間** | ✅ 高速化 | CloudFront: 5.27秒 vs 直接: 7.29秒 |
+| **コスト** | ✅ 最適化 | 0.41円（CloudFront経由） |
+
+#### **従来版（レガシー）**
 | モデル | ステータス | コスト | Function URL |
 |--------|------------|--------|--------------|
 | **Claude Haiku** | ✅ 動作確認済み | 0.2488円 | `https://fumsphmmxktt4afevrre332fvu0hfdal.lambda-url.us-west-2.on.aws/` |
@@ -180,13 +225,17 @@ aws cloudformation deploy \
 - `USD_TO_JPY`: 為替レート（USD→JPY）
 - `MODEL_ID`: 使用するモデルID
 - `CONTENTFUL_ACCESS_TOKEN`: Contentful API トークン
+- `CONTENTFUL_SPACE_ID`: Contentful Space ID
 - `SUMMARY_LAMBDA_NAME`: 要約Lambda関数名（分離版のみ）
+- `TAGS_LAMBDA_NAME`: タグ取得Lambda関数名（分離版のみ）
+- `CLOUDFRONT_SECRET_HEADER`: CloudFront認証用秘密ヘッダー（分離版のみ）
 
 ### 🔍 **開発フロー**
 1. `lambda-code/` でソース変更
 2. Dockerでローカルテスト
 3. CloudFormationテンプレートに反映
 4. デプロイ・動作確認
+5. セキュリティテスト実施
 
 ---
 
