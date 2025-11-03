@@ -1,0 +1,135 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Complete HTML Viewer Lambda Function with Review Feedback'
+
+Resources:
+  HtmlViewerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: complete-html-viewer
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 512
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+            const jsonData = {
+              "title": "ACMで発行する証明書のキーアルゴリズムやエクスポートの許可を変更した場合にDNS検証のCNAMEレコードが変わるか確認してみた",
+              "summary": "# ブログ記事要約\n\n## AWS Certificate Manager（ACM）のDNS検証レコードに関する検証記事\n\nこのブログ記事は、ACMで発行する証明書のキーアルゴリズムやエクスポート許可を変更した際に、DNS検証用のCNAMEレコードが変わるかを実験的に検証した内容です。\n\n### 主要な発見\n\n**最重要な結論**：同一AWSアカウント内で発行した証明書においては、以下のパラメータが変動してもDNS検証のCNAMEレコードは変わりません。\n\n- **キーアルゴリズム**（RSA 2048からECDSA P-256、ECDSA P-384への変更）\n- **エクスポート許可**（無効から有効への変更）\n- **リージョン**（us-east-1からap-northeast-1への変更）",
+              "snippet": "AWS ACMの証明書再発行時、DNS検証用CNAMEレコードは変わらない。キーアルゴリズムやエクスポート許可の変更、リージョン変更でも同一ドメイン・同一アカウント内なら検証レコードは維持される。複数証明書発行時は冪等性トークンの切り替えが必要。",
+              "selected_tags": ["AWS", "SSL/TLS証明書", "DNS検証", "セキュリティ", "クラウド運用"],
+              "review_feedback": "# 編集フィードバック\n\n## 1. 全体的なフィードバック\n\n**評価：技術的正確性は高く、実験的検証も充実しています。**\n\nこの記事は、AWS ACMの証明書再発行時にDNS検証レコードが変わるかを実際に検証した実践的な内容です。以下の点が優れています：\n\n- **技術的正確性**：複数のシナリオ（キーアルゴリズム変更、エクスポート設定、リージョン、アカウント）を網羅的に検証\n- **実験的根拠**：AWS CLIコマンドと出力結果を具体的に示し、結論を支持\n- **実用性**：DNS管理の手間削減という実務的な課題に答えている\n\n**改善が必要な点：**\n\n1. **冗長表現**：「証明書の証明書の」など重複表現がある\n2. **文法**：句読点の使用が不統一（「。」と「です。」の混在）\n3. **構成**：「いきなりまとめ」の位置が早く、背景説明が不足している\n4. **用語統一**：「冪等性トークン」の説明が後出しで、初出時に補足が必要\n5. **可読性**：セクション「同一のアカウント/リージョン/オプションで発行」が複雑で、要点が埋もれている",
+              "cost_breakdown": {
+                "total": {
+                  "input_tokens": 22575,
+                  "output_tokens": 6499,
+                  "total_cost_jpy": 2.0651
+                }
+              }
+            };
+
+            const html = `<!DOCTYPE html>
+          <html lang="ja">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Tag Selector Results</title>
+            <style>
+              body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; line-height: 1.6; color: #333; }
+              .header { border-bottom: 2px solid #333; padding-bottom: 20px; margin-bottom: 30px; }
+              .section { margin-bottom: 30px; padding: 20px; border: 1px solid #ddd; border-radius: 8px; background: #fafafa; }
+              .tags { display: flex; flex-wrap: wrap; gap: 8px; }
+              .tag { background: #007acc; color: white; padding: 4px 12px; border-radius: 16px; font-size: 14px; }
+              .cost { background: #f5f5f5; padding: 15px; border-radius: 5px; font-family: monospace; }
+              pre { background: #f8f8f8; padding: 15px; border-radius: 5px; overflow-x: auto; white-space: pre-wrap; font-size: 14px; }
+              h1 { color: #2c3e50; font-size: 24px; }
+              h2 { color: #34495e; font-size: 18px; margin-bottom: 15px; }
+              .review { background: #fff3cd; border-left: 4px solid #ffc107; }
+            </style>
+          </head>
+          <body>
+            <div class="header">
+              <h1>Tag Selector Results</h1>
+              <p><strong>記事タイトル:</strong> ${jsonData.title}</p>
+            </div>
+            
+            <div class="section">
+              <h2>📝 記事要約</h2>
+              <pre>${jsonData.summary}</pre>
+            </div>
+            
+            <div class="section">
+              <h2>✨ SEOスニペット</h2>
+              <p><strong>${jsonData.snippet}</strong></p>
+            </div>
+            
+            <div class="section">
+              <h2>🏷️ 選択されたタグ</h2>
+              <div class="tags">
+                ${jsonData.selected_tags.map(tag => `<span class="tag">${tag}</span>`).join('')}
+              </div>
+            </div>
+            
+            <div class="section review">
+              <h2>📋 編集フィードバック</h2>
+              <pre>${jsonData.review_feedback}</pre>
+            </div>
+            
+            <div class="section">
+              <h2>💰 コスト詳細</h2>
+              <div class="cost">
+                <div><strong>総コスト:</strong> ¥${jsonData.cost_breakdown.total.total_cost_jpy}</div>
+                <div><strong>入力トークン:</strong> ${jsonData.cost_breakdown.total.input_tokens.toLocaleString()}</div>
+                <div><strong>出力トークン:</strong> ${jsonData.cost_breakdown.total.output_tokens.toLocaleString()}</div>
+              </div>
+            </div>
+          </body>
+          </html>`;
+
+            return {
+              statusCode: 200,
+              headers: {
+                'Content-Type': 'text/html; charset=utf-8'
+              },
+              body: html
+            };
+          };
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  LambdaFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt HtmlViewerFunction.Arn
+      AuthType: NONE
+      Cors:
+        AllowCredentials: false
+        AllowMethods:
+          - GET
+        AllowOrigins:
+          - "*"
+
+  LambdaFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref HtmlViewerFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+Outputs:
+  FunctionUrl:
+    Description: 'Lambda Function URL'
+    Value: !GetAtt LambdaFunctionUrl.FunctionUrl

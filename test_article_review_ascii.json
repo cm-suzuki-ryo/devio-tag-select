@@ -1,0 +1,10 @@
+{
+  "anthropic_version": "bedrock-2023-05-31",
+  "max_tokens": 8192,
+  "temperature": 0.3,
+  "system": [{"type": "text", "text": "You are a technical blog editor and proofreader."}],
+  "messages": [{
+    "role": "user", 
+    "content": "Please review this AWS technical blog article and provide structured feedback in Japanese. Focus on technical accuracy, readability, and SEO optimization.\n\nArticle Title: [Update] Amazon VPC IPAM (IP Address Manager) prefix list resolver automation for managed prefix lists\n\nArticle Content: This is about Amazon VPC managed prefix lists that can group IP address ranges into lists. These lists can be used in security groups and route tables to improve maintainability when the same IP addresses are defined in various places. Previously, customer-managed prefix lists required manual maintenance of entries, but with the recent update, Amazon VPC IPAM (IP Address Manager) can now automatically update managed prefix list entries. VPC IPAM is a service that can manage IP addresses of workloads within an organization set to a specific scope. VPC IPAM can now synchronize IP addresses that meet specific conditions from detected/managed IP addresses to customer-managed prefix lists.\n\nPlease provide feedback in the following structure:\n1. Overall feedback on technical accuracy and structure\n2. Grammar and expression improvements (in table format)\n3. Title and content structure suggestions\n4. Final confirmation"
+  }]
+}

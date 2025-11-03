@@ -1,0 +1,211 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'HTML Viewer Lambda Function with Tag Selector Integration'
+
+Resources:
+  HtmlViewerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: integrated-html-viewer
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 60
+      MemorySize: 512
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+            const slug = event.queryStringParameters?.slug;
+            
+            if (!slug) {
+              const formHtml = `<!DOCTYPE html>
+              <html lang="ja">
+              <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Tag Selector - Slug入力</title>
+                <style>
+                  body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; line-height: 1.6; }
+                  .form-container { background: #f8f9fa; padding: 30px; border-radius: 8px; border: 1px solid #dee2e6; }
+                  h1 { color: #2c3e50; text-align: center; margin-bottom: 30px; }
+                  label { display: block; margin-bottom: 8px; font-weight: bold; color: #495057; }
+                  input[type="text"] { width: 100%; padding: 12px; border: 1px solid #ced4da; border-radius: 4px; font-size: 16px; margin-bottom: 20px; }
+                  button { background: #007bff; color: white; padding: 12px 24px; border: none; border-radius: 4px; font-size: 16px; cursor: pointer; width: 100%; }
+                  button:hover { background: #0056b3; }
+                  .example { background: #e9ecef; padding: 15px; border-radius: 4px; margin-top: 20px; font-size: 14px; }
+                </style>
+              </head>
+              <body>
+                <div class="form-container">
+                  <h1>🏷️ Tag Selector</h1>
+                  <form method="GET">
+                    <label for="slug">記事のSlugを入力してください:</label>
+                    <input type="text" id="slug" name="slug" placeholder="例: acm-certificate-dns-validation" required>
+                    <button type="submit">記事を解析</button>
+                  </form>
+                  <div class="example">
+                    <strong>例:</strong><br>
+                    • acm-certificate-dns-validation<br>
+                    • aws-lambda-function-url<br>
+                    • cloudformation-best-practices
+                  </div>
+                </div>
+              </body>
+              </html>`;
+              
+              return {
+                statusCode: 200,
+                headers: { 'Content-Type': 'text/html; charset=utf-8' },
+                body: formHtml
+              };
+            }
+            
+            try {
+              // Tag Selector統合システムのLambda URLを呼び出し
+              const tagSelectorUrl = 'https://kvtwpym4qb2q5zg6cly56c63mm0yhueh.lambda-url.us-west-2.on.aws/';
+              const response = await fetch(`${tagSelectorUrl}?slug=${encodeURIComponent(slug)}`);
+              
+              if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+              }
+              
+              const jsonData = await response.json();
+              
+              const html = `<!DOCTYPE html>
+              <html lang="ja">
+              <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Tag Selector Results - ${slug}</title>
+                <style>
+                  body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; line-height: 1.6; color: #333; }
+                  .header { border-bottom: 2px solid #333; padding-bottom: 20px; margin-bottom: 30px; }
+                  .section { margin-bottom: 30px; padding: 20px; border: 1px solid #ddd; border-radius: 8px; background: #fafafa; }
+                  .tags { display: flex; flex-wrap: wrap; gap: 8px; }
+                  .tag { background: #007acc; color: white; padding: 4px 12px; border-radius: 16px; font-size: 14px; }
+                  .cost { background: #f5f5f5; padding: 15px; border-radius: 5px; font-family: monospace; }
+                  pre { background: #f8f8f8; padding: 15px; border-radius: 5px; overflow-x: auto; white-space: pre-wrap; font-size: 14px; }
+                  h1 { color: #2c3e50; font-size: 24px; }
+                  h2 { color: #34495e; font-size: 18px; margin-bottom: 15px; }
+                  .review { background: #fff3cd; border-left: 4px solid #ffc107; }
+                  .back-link { display: inline-block; margin-bottom: 20px; color: #007bff; text-decoration: none; }
+                  .back-link:hover { text-decoration: underline; }
+                  .error { background: #f8d7da; color: #721c24; padding: 15px; border-radius: 5px; border: 1px solid #f5c6cb; }
+                </style>
+              </head>
+              <body>
+                <a href="?" class="back-link">← 新しいSlugを入力</a>
+                
+                <div class="header">
+                  <h1>Tag Selector Results</h1>
+                  <p><strong>解析対象Slug:</strong> <code>${slug}</code></p>
+                </div>
+                
+                <div class="section">
+                  <h2>📝 記事要約</h2>
+                  <pre>${jsonData.summary || 'データなし'}</pre>
+                </div>
+                
+                <div class="section">
+                  <h2>✨ SEOスニペット</h2>
+                  <p><strong>${jsonData.snippet || 'データなし'}</strong></p>
+                </div>
+                
+                <div class="section">
+                  <h2>🏷️ 選択されたタグ</h2>
+                  <div class="tags">
+                    ${(jsonData.selected_tags || []).map(tag => `<span class="tag">${tag}</span>`).join('')}
+                  </div>
+                </div>
+                
+                <div class="section review">
+                  <h2>📋 編集フィードバック</h2>
+                  <pre>${jsonData.review_feedback || 'データなし'}</pre>
+                </div>
+                
+                <div class="section">
+                  <h2>💰 コスト詳細</h2>
+                  <div class="cost">
+                    <div><strong>総コスト:</strong> ¥${jsonData.cost_breakdown?.total?.total_cost_jpy || '0'}</div>
+                    <div><strong>入力トークン:</strong> ${(jsonData.cost_breakdown?.total?.input_tokens || 0).toLocaleString()}</div>
+                    <div><strong>出力トークン:</strong> ${(jsonData.cost_breakdown?.total?.output_tokens || 0).toLocaleString()}</div>
+                  </div>
+                </div>
+              </body>
+              </html>`;
+
+              return {
+                statusCode: 200,
+                headers: { 'Content-Type': 'text/html; charset=utf-8' },
+                body: html
+              };
+              
+            } catch (error) {
+              const errorHtml = `<!DOCTYPE html>
+              <html lang="ja">
+              <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>エラー - Tag Selector</title>
+                <style>
+                  body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; line-height: 1.6; }
+                  .error { background: #f8d7da; color: #721c24; padding: 20px; border-radius: 5px; border: 1px solid #f5c6cb; }
+                  .back-link { display: inline-block; margin-top: 20px; color: #007bff; text-decoration: none; }
+                  .back-link:hover { text-decoration: underline; }
+                </style>
+              </head>
+              <body>
+                <div class="error">
+                  <h2>エラーが発生しました</h2>
+                  <p><strong>Slug:</strong> ${slug}</p>
+                  <p><strong>エラー:</strong> ${error.message}</p>
+                  <p>Tag Selectorシステムとの通信に失敗しました。しばらく時間をおいて再試行してください。</p>
+                </div>
+                <a href="?" class="back-link">← フォームに戻る</a>
+              </body>
+              </html>`;
+              
+              return {
+                statusCode: 200,
+                headers: { 'Content-Type': 'text/html; charset=utf-8' },
+                body: errorHtml
+              };
+            }
+          };
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  LambdaFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt HtmlViewerFunction.Arn
+      AuthType: NONE
+      Cors:
+        AllowCredentials: false
+        AllowMethods:
+          - GET
+        AllowOrigins:
+          - "*"
+
+  LambdaFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref HtmlViewerFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+Outputs:
+  FunctionUrl:
+    Description: 'Lambda Function URL'
+    Value: !GetAtt LambdaFunctionUrl.FunctionUrl
