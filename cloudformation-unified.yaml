@@ -32,6 +32,22 @@ Resources:
               - Effect: Allow
                 Action: lambda:InvokeFunction
                 Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:tag-selector-*'
+        - PolicyName: CloudWatchLogsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogDelivery
+                  - logs:GetLogDelivery
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                  - logs:PutLogEvents
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - logs:DescribeLogGroups
+                Resource: '*'
 
   # Lambda Execution Role
   LambdaExecutionRole:
@@ -69,6 +85,13 @@ Resources:
                 Action: lambda:InvokeFunction
                 Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:tag-selector-*'
 
+  # CloudWatch Log Group for Step Functions
+  StepFunctionsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/stepfunctions/${AWS::StackName}-tag-selector'
+      RetentionInDays: 14
+
   # Step Functions State Machine
   TagSelectorStateMachine:
     Type: AWS::StepFunctions::StateMachine
@@ -76,6 +99,12 @@ Resources:
       StateMachineName: tag-selector-unified
       StateMachineType: EXPRESS
       RoleArn: !GetAtt StepFunctionsRole.Arn
+      LoggingConfiguration:
+        Level: ALL
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt StepFunctionsLogGroup.Arn
       DefinitionString: !Sub |
         {
           "StartAt": "SetCostParameters",
@@ -151,6 +180,24 @@ Resources:
                       "Resource": "arn:aws:states:::lambda:invoke",
                       "Parameters": {
                         "FunctionName": "${SnippetGeneratorFunction}",
+                        "Payload": {
+                          "title.$": "$.article.Payload.title",
+                          "content.$": "$.article.Payload.content",
+                          "model_id.$": "$.model_id"
+                        }
+                      },
+                      "End": true
+                    }
+                  }
+                },
+                {
+                  "StartAt": "ArticleReview",
+                  "States": {
+                    "ArticleReview": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::lambda:invoke",
+                      "Parameters": {
+                        "FunctionName": "${ArticleReviewFunction}",
                         "Payload": {
                           "title.$": "$.article.Payload.title",
                           "content.$": "$.article.Payload.content",
@@ -498,6 +545,7 @@ Resources:
                   parallel_results = event.get('parallel_results', [])
                   tag_result = parallel_results[0]['Payload'] if len(parallel_results) > 0 else {}
                   snippet_result = parallel_results[1]['Payload'] if len(parallel_results) > 1 else {}
+                  review_result = parallel_results[2]['Payload'] if len(parallel_results) > 2 else {}
                   
                   # 記事データを取得
                   article_data = event.get('article', {}).get('Payload', {})
@@ -514,17 +562,20 @@ Resources:
                   summary_cost = summary_data.get('cache_info', {}) if summary_data else {}
                   tag_cost = tag_result.get('cache_info', {})
                   snippet_cost = snippet_result.get('cache_info', {})
+                  review_cost = review_result.get('cache_info', {})
                   
                   # 合算コスト計算
                   total_input_tokens = (
                       summary_cost.get('input_tokens', 0) + 
                       tag_cost.get('input_tokens', 0) + 
-                      snippet_cost.get('input_tokens', 0)
+                      snippet_cost.get('input_tokens', 0) +
+                      review_cost.get('input_tokens', 0)
                   )
                   total_output_tokens = (
                       summary_cost.get('output_tokens', 0) + 
                       tag_cost.get('output_tokens', 0) + 
-                      snippet_cost.get('output_tokens', 0)
+                      snippet_cost.get('output_tokens', 0) +
+                      review_cost.get('output_tokens', 0)
                   )
                   
                   # 価格設定（Step Functionsから取得）
@@ -566,6 +617,11 @@ Resources:
                       snippet_cost.get('output_tokens', 0)
                   )
                   
+                  review_tokens = calculate_tokens_only(
+                      review_cost.get('input_tokens', 0),
+                      review_cost.get('output_tokens', 0)
+                  )
+                  
                   # 合算コスト（JPY表示）
                   total_cost_info = calculate_cost_only(total_input_tokens, total_output_tokens)
                   
@@ -575,10 +631,12 @@ Resources:
                       'summary': summary_text,
                       'snippet': snippet_result.get('snippet', ''),
                       'selected_tags': tag_result.get('selected_tags', []),
+                      'review_feedback': review_result.get('review_feedback', ''),
                       'cost_breakdown': {
                           'summary': summary_tokens,
                           'tag_recommendation': tag_tokens,
                           'snippet_generation': snippet_tokens,
+                          'article_review': review_tokens,
                           'total': total_cost_info
                       }
                   }
@@ -592,13 +650,137 @@ Resources:
                       'summary': '',
                       'snippet': '',
                       'selected_tags': [],
+                      'review_feedback': '',
                       'cost_breakdown': {
                           'summary': None,
                           'tag_recommendation': {'input_tokens': 0, 'output_tokens': 0},
                           'snippet_generation': {'input_tokens': 0, 'output_tokens': 0},
+                          'article_review': {'input_tokens': 0, 'output_tokens': 0},
                           'total': {'input_tokens': 0, 'output_tokens': 0, 'input_cost_jpy': 0, 'output_cost_jpy': 0, 'total_cost_jpy': 0}
                       }
                   }
+
+  # HTML Formatter Function (独立)
+  HtmlFormatterFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: tag-selector-html-formatter
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+            try {
+              let data;
+              
+              // HTTP リクエストの場合
+              if (event.httpMethod) {
+                if (event.httpMethod === 'POST' && event.body) {
+                  data = JSON.parse(event.body);
+                } else if (event.httpMethod === 'GET' && event.queryStringParameters?.data) {
+                  data = JSON.parse(decodeURIComponent(event.queryStringParameters.data));
+                } else {
+                  return {
+                    statusCode: 400,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ error: 'JSON data required in body (POST) or data parameter (GET)' })
+                  };
+                }
+              } else {
+                // 直接呼び出しの場合
+                data = event;
+              }
+              
+              const html = generateHTML(data);
+              
+              return {
+                statusCode: 200,
+                headers: { 'Content-Type': 'text/html; charset=utf-8' },
+                body: html
+              };
+            } catch (error) {
+              return {
+                statusCode: 500,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ error: error.message })
+              };
+            }
+          };
+          
+          function generateHTML(data) {
+            const { title, summary, snippet, selected_tags, review_feedback, cost_breakdown } = data;
+            
+            return `<!DOCTYPE html>
+          <html lang="ja">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>${title || 'タグ選択結果'}</title>
+            <style>
+              body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 40px; line-height: 1.6; color: #333; }
+              .container { max-width: 800px; margin: 0 auto; }
+              .header { text-align: center; margin-bottom: 40px; }
+              .section { margin: 30px 0; padding: 20px; border-left: 4px solid #007acc; background: #f8f9fa; border-radius: 0 8px 8px 0; }
+              .section h2 { margin-top: 0; color: #007acc; }
+              .tags { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+              .tag { background: #007acc; color: white; padding: 6px 12px; border-radius: 16px; font-size: 14px; }
+              .cost { font-family: monospace; background: #e9ecef; padding: 15px; border-radius: 4px; font-size: 14px; }
+              .review { white-space: pre-wrap; background: white; padding: 15px; border-radius: 4px; border: 1px solid #dee2e6; }
+              .cost-item { margin: 5px 0; }
+            </style>
+          </head>
+          <body>
+            <div class="container">
+              <div class="header">
+                <h1>${title || 'タグ選択結果'}</h1>
+                <p style="color: #666;">AI による記事分析結果</p>
+              </div>
+              
+              <div class="section">
+                <h2>📝 要約</h2>
+                <p>${summary || 'なし'}</p>
+              </div>
+              
+              <div class="section">
+                <h2>✨ SEO スニペット</h2>
+                <p>${snippet || 'なし'}</p>
+              </div>
+              
+              <div class="section">
+                <h2>🏷️ 推薦タグ</h2>
+                <div class="tags">
+                  ${(selected_tags || []).map(tag => `<span class="tag">${tag}</span>`).join('')}
+                </div>
+                ${(selected_tags || []).length === 0 ? '<p>タグが選択されていません</p>' : ''}
+              </div>
+              
+              <div class="section">
+                <h2>📋 記事レビュー・改善提案</h2>
+                <div class="review">${review_feedback || 'レビューフィードバックがありません'}</div>
+              </div>
+              
+              <div class="section">
+                <h2>💰 処理コスト詳細</h2>
+                <div class="cost">
+                  <div class="cost-item"><strong>合計コスト:</strong> ${cost_breakdown?.total?.total_cost_jpy || 0} JPY</div>
+                  <div class="cost-item"><strong>入力トークン:</strong> ${cost_breakdown?.total?.input_tokens || 0}</div>
+                  <div class="cost-item"><strong>出力トークン:</strong> ${cost_breakdown?.total?.output_tokens || 0}</div>
+                  <hr style="margin: 10px 0;">
+                  <div class="cost-item">タグ推薦: ${cost_breakdown?.tag_recommendation?.input_tokens || 0} + ${cost_breakdown?.tag_recommendation?.output_tokens || 0}</div>
+                  <div class="cost-item">スニペット: ${cost_breakdown?.snippet_generation?.input_tokens || 0} + ${cost_breakdown?.snippet_generation?.output_tokens || 0}</div>
+                  <div class="cost-item">記事レビュー: ${cost_breakdown?.article_review?.input_tokens || 0} + ${cost_breakdown?.article_review?.output_tokens || 0}</div>
+                </div>
+              </div>
+              
+              <div style="text-align: center; margin-top: 40px; color: #666; font-size: 14px;">
+                Generated by Tag Selector AI System
+              </div>
+            </div>
+          </body>
+          </html>`;
+          }
 
   # Snippet Generator Function
   SnippetGeneratorFunction:
@@ -793,6 +975,76 @@ Resources:
               snippet_text = format_two_sentence_snippet(snippet_text)
               return snippet_text, cache_info
 
+  # Article Review Function
+  ArticleReviewFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: tag-selector-article-review
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+
+          def lambda_handler(event, context):
+              try:
+                  title = event.get('title', '')
+                  content = event.get('content', '')
+                  model_id = event.get('model_id', 'global.anthropic.claude-haiku-4-5-20251001-v1:0')
+                  
+                  if not title and not content:
+                      raise ValueError("title or content is required")
+                  
+                  article_json = {"title": title, "content": content}
+                  review_feedback, cache_info = generate_review_feedback(article_json, model_id)
+                  
+                  return {
+                      'review_feedback': review_feedback,
+                      'cache_info': cache_info,
+                      'model_id': model_id
+                  }
+              except Exception as e:
+                  raise Exception(f"Article review failed: {str(e)}")
+
+          def generate_review_feedback(article_json, model_id):
+              bedrock = boto3.client('bedrock-runtime', region_name='us-west-2')
+              
+              prompt = "# 役割と目標\\nあなたは、テックブログの編集者と校正役です。\\n提供されたJSON形式の記事データ（タイトルと本文）を、技術的な正確性を保ちつつ、検索性・可読性・説得力を高めるために編集サポートをします。\\n読者はAWSの基礎知識を持つ技術者と想定し、建設的なトーンを維持してください。\\n\\n# 実行手順と出力形式\\n\\n以下の順序でフィードバックを構成し、Markdownを使って構造化して出力すること。\\n\\n## 1. 全体的なフィードバック\\n* 記事の技術的正確性、構成、検証の流れについて簡潔に評価する。\\n\\n## 2. 表記と文法の編集\\n* 修正提案を必ず表形式（オリジナル/提案/理由）で出力する。\\n* 冗長表現、口語表現、文法ミス（句読点、助詞の重複）、専門用語の表記統一を指摘し、修正案を提示する。\\n\\n## 3. 構成とタイトルの改善提案\\n* タイトル: 長すぎるタイトルを指摘し、SEO/可読性を考慮した複数の代替案を提案する。\\n* 概要（スニペット）: 記事の価値を伝える100字程度の概要文を新規に作成して提案する。\\n* 導入: 読者の関心を引く課題提起を冒頭に追加する工夫を提案する。\\n\\n## 4. 最終確認\\n* 最後に、他にサポートが必要な点がないかユーザーに尋ねること。\\n\\n# 記事データ\\n" + json.dumps(article_json, ensure_ascii=False, indent=2)
+              
+              if 'nova' in model_id.lower():
+                  body = {
+                      "messages": [{"role": "user", "content": [{"text": prompt}]}],
+                      "inferenceConfig": {"temperature": 0.3, "maxTokens": 8192}
+                  }
+                  response = bedrock.invoke_model(modelId=model_id, body=json.dumps(body))
+                  response_body = json.loads(response['body'].read())
+                  review_feedback = response_body['output']['message']['content'][0]['text']
+                  cache_info = {
+                      'input_tokens': response_body['usage']['inputTokens'],
+                      'output_tokens': response_body['usage']['outputTokens']
+                  }
+              else:
+                  body = {
+                      "anthropic_version": "bedrock-2023-05-31",
+                      "max_tokens": 8192,
+                      "temperature": 0.3,
+                      "system": [{"type": "text", "text": "あなたはテックブログの編集者と校正役です。"}],
+                      "messages": [{"role": "user", "content": prompt}]
+                  }
+                  response = bedrock.invoke_model(modelId=model_id, body=json.dumps(body))
+                  response_body = json.loads(response['body'].read())
+                  review_feedback = response_body['content'][0]['text']
+                  cache_info = {
+                      'input_tokens': response_body['usage']['input_tokens'],
+                      'output_tokens': response_body['usage']['output_tokens']
+                  }
+              
+              return review_feedback, cache_info
+
   # Function URL
   MainFunctionUrl:
     Type: AWS::Lambda::Url
@@ -812,10 +1064,35 @@ Resources:
       Principal: "*"
       FunctionUrlAuthType: NONE
 
+  # HTML Formatter Function URL
+  HtmlFormatterFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt HtmlFormatterFunction.Arn
+      AuthType: NONE
+      Cors:
+        AllowCredentials: false
+        AllowMethods: [GET, POST]
+        AllowOrigins: ["*"]
+
+  HtmlFormatterFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref HtmlFormatterFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
 Outputs:
   LambdaURL:
     Description: 'Lambda Function URL'
     Value: !GetAtt MainFunctionUrl.FunctionUrl
+  HtmlFormatterURL:
+    Description: 'HTML Formatter Function URL'
+    Value: !GetAtt HtmlFormatterFunctionUrl.FunctionUrl
   StepFunctionsArn:
     Description: 'Step Functions State Machine ARN'
     Value: !Ref TagSelectorStateMachine
+  StepFunctionsLogGroup:
+    Description: 'CloudWatch Log Group for Step Functions execution logs'
+    Value: !GetAtt StepFunctionsLogGroup.Arn
