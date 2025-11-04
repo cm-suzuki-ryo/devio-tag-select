@@ -5,11 +5,12 @@ AWS Bedrockを使用したAIベースのブログ記事タグ自動選択シス�
 ## 🏗️ **統合アーキテクチャ - Step Functions版**
 
 ### **新アーキテクチャ**
-- **メインLambda**: Step Functions実行専用
-- **Contentful取得Lambda**: 記事取得専用
-- **要約Lambda**: 記事要約専用（長文時のみ）
+- **HTML Formatter Lambda**: Web UI + Step Functions実行
+- **Contentful取得Lambda**: 記事取得専用（Preview API対応）
+- **要約Lambda**: 記事要約専用（全記事で実行）
 - **タグ取得Lambda**: タグ取得専用
 - **推薦Lambda**: タグ推薦専用
+- **スニペット生成Lambda**: SEO用スニペット生成
 - **Step Functions Express**: ワークフロー制御
 
 ### **統合のメリット**
@@ -18,33 +19,47 @@ AWS Bedrockを使用したAIベースのブログ記事タグ自動選択シス�
 - **独立スケーリング**: 各処理を個別にスケール
 - **エラーハンドリング**: 各ステップでリトライ設定
 - **コスト効率**: Express版で低コスト実現
+- **マルチリージョン対応**: us-east-1, us-west-2等で動作
 
 ## 🔄 **処理フロー**
 ```
-Client → Lambda Function URL → Step Functions
-                              ├─ Contentful記事取得
-                              ├─ タグ一覧取得
-                              ├─ 要約処理（8000文字超の場合）
-                              ├─ 並列実行 ┬─ タグ推薦
-                              │          └─ スニペット生成
-                              └─ 結果統合 → 出力
+Client → CloudFront (Basic認証) → HTML Formatter Lambda → Step Functions
+                                                        ├─ Contentful記事取得 (Preview API)
+                                                        ├─ タグ一覧取得
+                                                        ├─ 要約処理（全記事で実行）
+                                                        ├─ 並列実行 ┬─ タグ推薦
+                                                        │          └─ スニペット生成
+                                                        └─ 結果統合 → HTML表示
 ```
 
-## ✨ **新機能: スニペット生成**
+## ✨ **主要機能**
+
+### **Web UI (Protected)**
+- **CloudFront + Basic認証**: cm:cm でアクセス保護
+- **Contentful URL入力**: 記事執筆URLから直接解析
+- **リアルタイム処理**: Step Functions経由で即座に結果表示
+- **美しいHTML出力**: タグ、スニペット、コスト情報を視覚化
+
+### **スニペット生成**
 - **SEO最適化**: 160文字制限でGoogle検索結果に最適
 - **AI生成**: 記事内容から魅力的な要約を自動生成
 - **並列処理**: タグ推薦と同時実行で処理時間短縮
-- **複数モデル対応**: Nova Lite, Claude Haiku, gpt-oss-20b
+- **複数モデル対応**: Nova Lite, Claude Haiku対応
+
+### **Contentful統合**
+- **Preview API**: 未公開記事も解析可能
+- **URL検証**: 指定されたspaceのURLのみ受け入れ
+- **クエリパラメータ対応**: ?focusedField=title等を自動処理
 
 ## LLM開発者向け技術情報
 
 ### 🏗️ **アーキテクチャ概要**
-- **言語**: Python 3.11
-- **AWS リージョン**: us-west-2（オレゴン）
-- **AWS サービス**: Lambda, Bedrock, Step Functions, CloudFormation
-- **外部API**: Contentful
+- **言語**: Python 3.11 (Lambda), Node.js 20.x (HTML Formatter)
+- **AWS リージョン**: マルチリージョン対応（us-east-1, us-west-2等）
+- **AWS サービス**: Lambda, Bedrock, Step Functions, CloudFormation, CloudFront
+- **外部API**: Contentful (Preview API)
 - **ワークフロー**: Step Functions Express
-- **価格計算**: 環境変数ベース
+- **価格計算**: 環境変数ベース、動的JPY換算
 
 ### 📁 **ソースコード構成**
 ```
@@ -62,12 +77,14 @@ lambda-code/
 ### 🔄 **Step Functions定義**
 ```json
 {
+### 🔄 **Step Functions定義**
+```json
+{
   "StartAt": "GetArticle",
   "States": {
     "GetArticle": "記事取得",
     "GetTags": "タグ一覧取得", 
-    "CheckTextLength": "文字数判定",
-    "SummarizeText": "要約処理（条件付き）",
+    "SummarizeText": "要約処理（全記事で実行）",
     "ParallelProcessing": {
       "Type": "Parallel",
       "Branches": [
@@ -80,20 +97,29 @@ lambda-code/
 }
 ```
 
-### 🧪 **テスト環境**
+### 🧪 **デプロイ方法**
 
-#### **統一版テスト**
+#### **Protected Web UI版（推奨）**
 ```bash
 # デプロイ
 aws cloudformation deploy \
-  --template-file cloudformation-unified.yaml \
-  --stack-name tag-selector-unified \
+  --template-file cloudformation-protected-web-ui.yaml \
+  --stack-name tag-selector-protected-web-ui \
   --capabilities CAPABILITY_IAM \
-  --region us-west-2 \
+  --region us-east-1 \
+  --s3-bucket aws-cloudformation-templates-784693731708-us-east-1 \
   --parameter-overrides \
     ContentfulSpaceId="ct0aopd36mqt" \
-    ContentfulAccessToken="6Z4wPWStkHj3d_EA0MQt89nWJpIFSBJcmAQ_YzDpkAg"
+    ContentfulAccessToken="6Z4wPWStkHj3d_EA0MQt89nWJpIFSBJcmAQ_YzDpkAg" \
+    ContentfulPreviewToken="vSd5M3IdcLZvfiGphiuMsgYc1wf31zGSGRS0lrxlZl0" \
+    BasicAuthUser="cm" \
+    BasicAuthPassword="cm"
 ```
+
+### 🌐 **アクセス方法**
+- **CloudFront URL**: https://d2yvh52qto32qs.cloudfront.net
+- **Basic認証**: cm:cm
+- **入力**: Contentful記事執筆URL（例: https://app.contentful.com/spaces/ct0aopd36mqt/entries/ENTRY_ID?focusedField=title）
 
 ### 🔧 **モデル別API仕様**
 
