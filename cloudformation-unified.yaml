@@ -34,7 +34,7 @@ Resources:
               Service: states.amazonaws.com
             Action: sts:AssumeRole
       Policies:
-        - PolicyName: LambdaInvokePolicy
+        - PolicyName: StepFunctionsLambdaInvokePolicy
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
@@ -101,20 +101,13 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
       Policies:
-        - PolicyName: LambdaInvokePolicy
+        - PolicyName: HtmlFormatterLambdaInvokePolicy
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
                 Action: lambda:InvokeFunction
                 Resource: !GetAtt MainFunction.Arn
-        - PolicyName: LambdaInvokePolicy
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action: lambda:InvokeFunction
-                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:tag-selector-*'
 
   # CloudWatch Log Group for Step Functions
   StepFunctionsLogGroup:
