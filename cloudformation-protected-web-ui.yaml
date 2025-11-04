@@ -213,24 +213,6 @@ Resources:
                       "End": true
                     }
                   }
-                },
-                {
-                  "StartAt": "ArticleReview",
-                  "States": {
-                    "ArticleReview": {
-                      "Type": "Task",
-                      "Resource": "arn:aws:states:::lambda:invoke",
-                      "Parameters": {
-                        "FunctionName": "${ArticleReviewFunction}",
-                        "Payload": {
-                          "title.$": "$.article.Payload.title",
-                          "content.$": "$.article.Payload.content",
-                          "model_id.$": "$.model_id"
-                        }
-                      },
-                      "End": true
-                    }
-                  }
                 }
               ],
               "ResultPath": "$.parallel_results",
@@ -508,7 +490,7 @@ Resources:
                   bedrock = boto3.client('bedrock-runtime', region_name='us-west-2')
                   
                   tag_list = "\n".join([f"- {tag['name']}: {tag.get('description', '')}" for tag in filtered_tags])
-                  prompt = f"以下の記事に最適なタグを5個選んでください:\n\n記事内容:\n{text[:2000]}\n\n利用可能なタグ:\n{tag_list}\n\nJSON形式で回答してください:\n{{\"selected_tags\": [\"タグ1\", \"タグ2\", \"タグ3\", \"タグ4\", \"タグ5\"]}}"
+                  prompt = f"以下の記事に最適なタグを10個選んでください:\n\n記事内容:\n{text[:2000]}\n\n利用可能なタグ:\n{tag_list}\n\nJSON形式で回答してください。各タグに適合度（1-100、最も適合するものを100）を含め、スコアの高い順に並べてください:\n{{\"selected_tags\": [{{\"name\": \"タグ1\", \"score\": 95}}, {{\"name\": \"タグ2\", \"score\": 88}}]}}"
                   
                   if 'nova' in model_id.lower():
                       body = {
@@ -537,13 +519,45 @@ Resources:
                           'output_tokens': response_body['usage']['output_tokens']
                       }
                   
-                  # Extract JSON
-                  json_match = re.search(r'\{[^}]*"selected_tags"[^}]*\}', result_text)
-                  if json_match:
-                      selected_data = json.loads(json_match.group())
+                  # Extract JSON - Markdownコードブロックにも対応
+                  try:
+                      # Markdownコードブロックを除去
+                      clean_text = re.sub(r'```[a-z]*\n?', '', result_text)
+                      clean_text = re.sub(r'```', '', clean_text)
+                      
+                      # 完全なJSONブロックを探す
+                      json_match = re.search(r'\{.*?"selected_tags".*?\].*?\}', clean_text, re.DOTALL)
+                      if json_match:
+                          json_text = json_match.group()
+                      else:
+                          # 部分的なマッチを試す
+                          json_match = re.search(r'"selected_tags":\s*\[.*?\]', clean_text, re.DOTALL)
+                          if json_match:
+                              json_text = '{' + json_match.group() + '}'
+                          else:
+                              raise ValueError("No JSON found")
+                      
+                      print(f"Extracted JSON: {json_text}")
+                      selected_data = json.loads(json_text)
                       selected_tags = selected_data.get('selected_tags', [])
-                  else:
-                      selected_tags = [tag['name'] for tag in filtered_tags[:5]]
+                      
+                      # スコア付きタグの場合とシンプルなタグの場合を両方サポート
+                      if selected_tags and isinstance(selected_tags[0], dict):
+                          # スコア付きタグの場合はそのまま
+                          pass
+                      else:
+                          # シンプルなタグの場合はスコア80をデフォルトで追加
+                          selected_tags = [{"name": str(tag), "score": 80} for tag in selected_tags if tag]
+                      
+                      # スコアの高い順にソートして上位10個を取得
+                      if selected_tags and isinstance(selected_tags[0], dict):
+                          selected_tags = sorted(selected_tags, key=lambda x: x.get('score', 0), reverse=True)[:10]
+                          
+                  except Exception as e:
+                      print(f"JSON parsing error: {e}")
+                      print(f"Raw result: {result_text}")
+                      # フォールバック: 最初の10個のタグを使用
+                      selected_tags = [{"name": tag['name'], "score": 70} for tag in filtered_tags[:10]]
                   
                   return {
                       'selected_tags': selected_tags,
@@ -571,7 +585,11 @@ Resources:
                   parallel_results = event.get('parallel_results', [])
                   tag_result = parallel_results[0]['Payload'] if len(parallel_results) > 0 else {}
                   snippet_result = parallel_results[1]['Payload'] if len(parallel_results) > 1 else {}
-                  review_result = parallel_results[2]['Payload'] if len(parallel_results) > 2 else {}
+                  # ArticleReviewは除外
+                  review_result = {}
+                  
+                  # モデル情報を取得（スニペット生成結果から）
+                  model_id = snippet_result.get('model_id', 'us.amazon.nova-lite-v1:0')
                   
                   # 記事データを取得
                   article_data = event.get('article', {}).get('Payload', {})
@@ -658,6 +676,7 @@ Resources:
                       'snippet': snippet_result.get('snippet', ''),
                       'selected_tags': tag_result.get('selected_tags', []),
                       'review_feedback': review_result.get('review_feedback', ''),
+                      'model_id': model_id,
                       'cost_breakdown': {
                           'summary': summary_tokens,
                           'tag_recommendation': tag_tokens,
@@ -694,7 +713,7 @@ Resources:
       Runtime: nodejs20.x
       Handler: index.handler
       Role: !GetAtt HtmlFormatterLambdaExecutionRole.Arn
-      Timeout: 30
+      Timeout: 180
       Environment:
         Variables:
           MAIN_FUNCTION_NAME: !Ref MainFunction
@@ -704,15 +723,40 @@ Resources:
           const lambda = new LambdaClient();
           
           exports.handler = async (event) => {
+            console.log('Event received:', JSON.stringify(event, null, 2));
             try {
               let slug;
               
               // HTTP リクエストの場合
-              if (event.httpMethod) {
-                if (event.httpMethod === 'POST' && event.body) {
-                  const body = JSON.parse(event.body);
-                  slug = body.slug;
-                } else if (event.httpMethod === 'GET' && event.queryStringParameters?.slug) {
+              if (event.requestContext && event.requestContext.http) {
+                const httpMethod = event.requestContext.http.method;
+                console.log('HTTP Method:', httpMethod);
+                console.log('Query Parameters:', event.queryStringParameters);
+                console.log('Body:', event.body);
+                
+                if (httpMethod === 'POST' && event.body) {
+                  try {
+                    let bodyText = event.body;
+                    if (event.isBase64Encoded) {
+                      bodyText = Buffer.from(event.body, 'base64').toString('utf-8');
+                    }
+                    console.log('Decoded body:', bodyText);
+                    
+                    // form-urlencoded形式をパース
+                    if (event.headers['content-type'] === 'application/x-www-form-urlencoded') {
+                      const params = new URLSearchParams(bodyText);
+                      slug = params.get('slug');
+                      console.log('Parsed slug from form:', slug);
+                    } else {
+                      const body = JSON.parse(bodyText);
+                      slug = body.slug;
+                      console.log('Parsed slug from JSON:', slug);
+                    }
+                  } catch (error) {
+                    console.error('Error parsing body:', error);
+                    slug = undefined;
+                  }
+                } else if (httpMethod === 'GET' && event.queryStringParameters?.slug) {
                   slug = event.queryStringParameters.slug;
                 } else {
                   return {
@@ -725,6 +769,8 @@ Resources:
                 // 直接呼び出しの場合
                 slug = event.slug;
               }
+              
+              console.log('Extracted slug:', slug);
               
               if (!slug) {
                 return {
@@ -741,11 +787,18 @@ Resources:
               });
               
               const result = await lambda.send(command);
-              const data = JSON.parse(new TextDecoder().decode(result.Payload));
+              console.log('Lambda invoke result:', result);
+              const response = JSON.parse(new TextDecoder().decode(result.Payload));
+              console.log('Parsed response:', JSON.stringify(response, null, 2));
               
-              if (data.errorMessage) {
-                throw new Error(data.errorMessage);
+              if (response.errorMessage) {
+                console.error('MainFunction error:', response.errorMessage);
+                throw new Error(response.errorMessage);
               }
+              
+              // MainFunctionはHTTPレスポンス形式で返すため、bodyをパース
+              const data = JSON.parse(response.body);
+              console.log('Final data:', JSON.stringify(data, null, 2));
               
               const html = generateResultHTML(data);
               
@@ -817,6 +870,19 @@ Resources:
           function generateResultHTML(data) {
             const { title, summary, snippet, selected_tags, review_feedback, cost_breakdown } = data;
             
+            // タグの表示処理（スコア付きタグに対応）
+            const renderTags = (tags) => {
+              if (!tags || tags.length === 0) return '<p>タグが選択されていません</p>';
+              
+              return tags.map(tag => {
+                if (typeof tag === 'object' && tag.name) {
+                  return `<span class="tag">${tag.name} <small>(${tag.score}/100)</small></span>`;
+                } else {
+                  return `<span class="tag">${tag}</span>`;
+                }
+              }).join('');
+            };
+            
             return `<!DOCTYPE html>
           <html lang="ja">
           <head>
@@ -856,14 +922,16 @@ Resources:
               <div class="section">
                 <h2>🏷️ 推薦タグ</h2>
                 <div class="tags">
-                  ${(selected_tags || []).map(tag => `<span class="tag">${tag}</span>`).join('')}
+                  ${renderTags(selected_tags)}
                 </div>
-                ${(selected_tags || []).length === 0 ? '<p>タグが選択されていません</p>' : ''}
               </div>
               
               <div class="section">
-                <h2>📋 記事レビュー・改善提案</h2>
-                <div class="review">${review_feedback || 'レビューフィードバックがありません'}</div>
+                <h2>🤖 利用モデル情報</h2>
+                <div class="model-info">
+                  <div class="cost-item"><strong>モデル:</strong> ${data.model_id || 'us.amazon.nova-lite-v1:0'}</div>
+                  <div class="cost-item"><strong>処理時間:</strong> ${data.processing_time || 'N/A'}</div>
+                </div>
               </div>
               
               <div class="section">
@@ -875,7 +943,6 @@ Resources:
                   <hr style="margin: 10px 0;">
                   <div class="cost-item">タグ推薦: ${cost_breakdown?.tag_recommendation?.input_tokens || 0} + ${cost_breakdown?.tag_recommendation?.output_tokens || 0}</div>
                   <div class="cost-item">スニペット: ${cost_breakdown?.snippet_generation?.input_tokens || 0} + ${cost_breakdown?.snippet_generation?.output_tokens || 0}</div>
-                  <div class="cost-item">記事レビュー: ${cost_breakdown?.article_review?.input_tokens || 0} + ${cost_breakdown?.article_review?.output_tokens || 0}</div>
                 </div>
               </div>
               
@@ -1161,6 +1228,26 @@ Resources:
         AllowMethods: [GET, POST]
         AllowOrigins: ["*"]
 
+  # Custom Cache Policy for Query Parameters
+  HtmlFormatterCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub 'HtmlFormatterCachePolicy-${AWS::StackName}'
+        Comment: 'Cache policy that includes query parameters for HTML Formatter'
+        DefaultTTL: 300
+        MaxTTL: 31536000
+        MinTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingGzip: true
+          EnableAcceptEncodingBrotli: true
+          QueryStringsConfig:
+            QueryStringBehavior: all
+          HeadersConfig:
+            HeaderBehavior: none
+          CookiesConfig:
+            CookieBehavior: none
+
   # Custom Origin Request Policy for Query Parameters
   HtmlFormatterOriginRequestPolicy:
     Type: AWS::CloudFront::OriginRequestPolicy
@@ -1235,12 +1322,14 @@ Resources:
             CustomOriginConfig:
               HTTPPort: 443
               OriginProtocolPolicy: https-only
+              OriginReadTimeout: 60
+              OriginKeepaliveTimeout: 5
         DefaultCacheBehavior:
           TargetOriginId: HtmlFormatterOrigin
           ViewerProtocolPolicy: redirect-to-https
           AllowedMethods: [DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT]
           CachedMethods: [GET, HEAD]
-          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
+          CachePolicyId: !Ref HtmlFormatterCachePolicy
           OriginRequestPolicyId: !Ref HtmlFormatterOriginRequestPolicy
           FunctionAssociations:
             - EventType: viewer-request
