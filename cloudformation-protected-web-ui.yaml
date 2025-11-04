@@ -20,6 +20,22 @@ Parameters:
     Default: testpass123
     NoEcho: true
     Description: Basic Authentication Password
+  ModelId:
+    Type: String
+    Default: 'global.anthropic.claude-haiku-4-5-20251001-v1:0'
+    Description: 'AI Model ID to use for processing'
+  InputTokenPrice:
+    Type: Number
+    Default: 0.25
+    Description: 'Input token price per million tokens (USD)'
+  OutputTokenPrice:
+    Type: Number
+    Default: 1.25
+    Description: 'Output token price per million tokens (USD)'
+  UsdToJpy:
+    Type: Number
+    Default: 150
+    Description: 'USD to JPY exchange rate'
 
 Resources:
   # IAM Role for Step Functions
@@ -87,7 +103,7 @@ Resources:
                 Action: states:StartSyncExecution
                 Resource: !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:tag-selector-unified-${AWS::StackName}'
 
-  # HTML Formatter Lambda Execution Role (with Lambda invoke permissions)
+  # HTML Formatter Lambda Execution Role (with Step Functions permissions)
   HtmlFormatterLambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -101,13 +117,13 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
       Policies:
-        - PolicyName: HtmlFormatterLambdaInvokePolicy
+        - PolicyName: HtmlFormatterStepFunctionsPolicy
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
-                Action: lambda:InvokeFunction
-                Resource: !GetAtt MainFunction.Arn
+                Action: states:StartSyncExecution
+                Resource: !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:tag-selector-unified-${AWS::StackName}'
 
   # CloudWatch Log Group for Step Functions
   StepFunctionsLogGroup:
@@ -131,18 +147,8 @@ Resources:
               LogGroupArn: !GetAtt StepFunctionsLogGroup.Arn
       DefinitionString: !Sub |
         {
-          "StartAt": "SetCostParameters",
+          "StartAt": "GetArticle",
           "States": {
-            "SetCostParameters": {
-              "Type": "Pass",
-              "Parameters": {
-                "input_price_per_million": 0.25,
-                "output_price_per_million": 1.25,
-                "usd_to_jpy": 150
-              },
-              "ResultPath": "$.cost_params",
-              "Next": "GetArticle"
-            },
             "GetArticle": {
               "Type": "Task",
               "Resource": "arn:aws:states:::lambda:invoke",
@@ -216,69 +222,44 @@ Resources:
                 }
               ],
               "ResultPath": "$.parallel_results",
-              "Next": "FormatOutput"
+              "Next": "FormatOutputWithJSONATA"
             },
-            "FormatOutput": {
-              "Type": "Task",
-              "Resource": "arn:aws:states:::lambda:invoke",
+            "FormatOutputWithJSONATA": {
+              "Type": "Pass",
               "Parameters": {
-                "FunctionName": "${OutputFormatterFunction}",
-                "Payload.$": "$"
-              },
-              "ResultSelector": {
-                "result.$": "$.Payload"
+                "title.$": "$.article.Payload.title",
+                "summary.$": "$.summary.Payload.summary_text",
+                "snippet.$": "$.parallel_results[1].Payload.snippet",
+                "selected_tags.$": "$.parallel_results[0].Payload.selected_tags",
+                "review_feedback": "",
+                "model_id.$": "$.parallel_results[1].Payload.model_id",
+                "cost_breakdown": {
+                  "summary": {
+                    "input_tokens.$": "$.summary.Payload.cache_info.input_tokens",
+                    "output_tokens.$": "$.summary.Payload.cache_info.output_tokens"
+                  },
+                  "tag_recommendation": {
+                    "input_tokens.$": "$.parallel_results[0].Payload.cache_info.input_tokens",
+                    "output_tokens.$": "$.parallel_results[0].Payload.cache_info.output_tokens"
+                  },
+                  "snippet_generation": {
+                    "input_tokens.$": "$.parallel_results[1].Payload.cache_info.input_tokens",
+                    "output_tokens.$": "$.parallel_results[1].Payload.cache_info.output_tokens"
+                  },
+                  "article_review": {
+                    "input_tokens": 0,
+                    "output_tokens": 0
+                  },
+                  "total": {
+                    "input_tokens.$": "States.MathAdd(States.MathAdd($.summary.Payload.cache_info.input_tokens, $.parallel_results[0].Payload.cache_info.input_tokens), $.parallel_results[1].Payload.cache_info.input_tokens)",
+                    "output_tokens.$": "States.MathAdd(States.MathAdd($.summary.Payload.cache_info.output_tokens, $.parallel_results[0].Payload.cache_info.output_tokens), $.parallel_results[1].Payload.cache_info.output_tokens)"
+                  }
+                }
               },
               "End": true
             }
           }
         }
-
-  # Main Lambda Function
-  MainFunction:
-    Type: AWS::Lambda::Function
-    Properties:
-      FunctionName: !Sub 'tag-selector-unified-main-${AWS::StackName}'
-      Runtime: python3.11
-      Handler: index.lambda_handler
-      Role: !GetAtt LambdaExecutionRole.Arn
-      Timeout: 300
-      Code:
-        ZipFile: !Sub |
-          import json
-          import boto3
-          import os
-          import uuid
-
-          def lambda_handler(event, context):
-              try:
-                  # Lambda Function URL形式のイベント判定
-                  if event.get('requestContext', {}).get('http', {}).get('method'):
-                      method = event['requestContext']['http']['method']
-                      params = event.get('queryStringParameters') or {} if method == 'GET' else json.loads(event.get('body', '{}'))
-                  else:
-                      params = event
-
-                  slug = params.get('slug')
-                  model_id = params.get('model_id', 'global.anthropic.claude-haiku-4-5-20251001-v1:0')
-
-                  if not slug:
-                      return {'statusCode': 400, 'body': json.dumps({'error': 'slug required'})}
-
-                  stepfunctions = boto3.client('stepfunctions')
-                  response = stepfunctions.start_sync_execution(
-                      stateMachineArn='${TagSelectorStateMachine}',
-                      name=f"tag-selector-{uuid.uuid4().hex[:8]}",
-                      input=json.dumps({'slug': slug, 'model_id': model_id})
-                  )
-
-                  if response['status'] == 'SUCCEEDED':
-                      result = json.loads(response['output'])
-                      return {'statusCode': 200, 'headers': {'Content-Type': 'application/json'}, 'body': json.dumps(result['result'])}
-                  else:
-                      return {'statusCode': 500, 'body': json.dumps({'error': 'Step Functions failed'})}
-
-              except Exception as e:
-                  return {'statusCode': 500, 'body': json.dumps({'error': str(e)})}
 
   # Contentful Getter Function
   ContentfulGetterFunction:
@@ -293,6 +274,10 @@ Resources:
         Variables:
           CONTENTFUL_SPACE_ID: !Ref ContentfulSpaceId
           CONTENTFUL_ACCESS_TOKEN: !Ref ContentfulAccessToken
+          MODEL_ID: !Ref ModelId
+          INPUT_PRICE_PER_MILLION: !Ref InputTokenPrice
+          OUTPUT_PRICE_PER_MILLION: !Ref OutputTokenPrice
+          USD_TO_JPY: !Ref UsdToJpy
       Code:
         ZipFile: |
           import json
@@ -404,6 +389,10 @@ Resources:
         Variables:
           CONTENTFUL_SPACE_ID: !Ref ContentfulSpaceId
           CONTENTFUL_ACCESS_TOKEN: !Ref ContentfulAccessToken
+          MODEL_ID: !Ref ModelId
+          INPUT_PRICE_PER_MILLION: !Ref InputTokenPrice
+          OUTPUT_PRICE_PER_MILLION: !Ref OutputTokenPrice
+          USD_TO_JPY: !Ref UsdToJpy
       Code:
         ZipFile: |
           import json
@@ -566,145 +555,6 @@ Resources:
               except Exception as e:
                   raise Exception(f"Recommendation failed: {str(e)}")
 
-  # Final Output Formatter Function
-  OutputFormatterFunction:
-    Type: AWS::Lambda::Function
-    Properties:
-      FunctionName: !Sub 'tag-selector-output-formatter-${AWS::StackName}'
-      Runtime: python3.11
-      Handler: index.lambda_handler
-      Role: !GetAtt LambdaExecutionRole.Arn
-      Timeout: 30
-      Code:
-        ZipFile: |
-          import json
-
-          def lambda_handler(event, context):
-              try:
-                  # 並列実行結果を取得
-                  parallel_results = event.get('parallel_results', [])
-                  tag_result = parallel_results[0]['Payload'] if len(parallel_results) > 0 else {}
-                  snippet_result = parallel_results[1]['Payload'] if len(parallel_results) > 1 else {}
-                  # ArticleReviewは除外
-                  review_result = {}
-                  
-                  # モデル情報を取得（スニペット生成結果から）
-                  model_id = snippet_result.get('model_id', 'us.amazon.nova-lite-v1:0')
-                  
-                  # 記事データを取得
-                  article_data = event.get('article', {}).get('Payload', {})
-                  summary_data = event.get('summary', {}).get('Payload', {})
-                  
-                  # 要約文章を決定（要約があれば要約、なければ記事の最初の200文字）
-                  if summary_data and summary_data.get('summary_text'):
-                      summary_text = summary_data['summary_text']
-                  else:
-                      blog_text = article_data.get('blog_text', '')
-                      summary_text = blog_text[:200] + "..." if len(blog_text) > 200 else blog_text
-                  
-                  # コスト情報を詳細に分解
-                  summary_cost = summary_data.get('cache_info', {}) if summary_data else {}
-                  tag_cost = tag_result.get('cache_info', {})
-                  snippet_cost = snippet_result.get('cache_info', {})
-                  review_cost = review_result.get('cache_info', {})
-                  
-                  # 合算コスト計算
-                  total_input_tokens = (
-                      summary_cost.get('input_tokens', 0) + 
-                      tag_cost.get('input_tokens', 0) + 
-                      snippet_cost.get('input_tokens', 0) +
-                      review_cost.get('input_tokens', 0)
-                  )
-                  total_output_tokens = (
-                      summary_cost.get('output_tokens', 0) + 
-                      tag_cost.get('output_tokens', 0) + 
-                      snippet_cost.get('output_tokens', 0) +
-                      review_cost.get('output_tokens', 0)
-                  )
-                  
-                  # 価格設定（Step Functionsから取得）
-                  cost_params = event.get('cost_params', {})
-                  input_price = cost_params.get('input_price_per_million', 0.25)
-                  output_price = cost_params.get('output_price_per_million', 1.25)
-                  usd_to_jpy = cost_params.get('usd_to_jpy', 150)
-                  
-                  def calculate_tokens_only(input_tokens, output_tokens):
-                      return {
-                          'input_tokens': input_tokens,
-                          'output_tokens': output_tokens
-                      }
-                  
-                  def calculate_cost_only(input_tokens, output_tokens):
-                      input_cost = (input_tokens / 1000000) * input_price * usd_to_jpy
-                      output_cost = (output_tokens / 1000000) * output_price * usd_to_jpy
-                      return {
-                          'input_tokens': input_tokens,
-                          'output_tokens': output_tokens,
-                          'input_cost_jpy': round(input_cost, 4),
-                          'output_cost_jpy': round(output_cost, 4),
-                          'total_cost_jpy': round(input_cost + output_cost, 4)
-                      }
-                  
-                  # 各処理のトークン数のみ
-                  summary_tokens = calculate_tokens_only(
-                      summary_cost.get('input_tokens', 0),
-                      summary_cost.get('output_tokens', 0)
-                  ) if summary_data else None
-                  
-                  tag_tokens = calculate_tokens_only(
-                      tag_cost.get('input_tokens', 0),
-                      tag_cost.get('output_tokens', 0)
-                  )
-                  
-                  snippet_tokens = calculate_tokens_only(
-                      snippet_cost.get('input_tokens', 0),
-                      snippet_cost.get('output_tokens', 0)
-                  )
-                  
-                  review_tokens = calculate_tokens_only(
-                      review_cost.get('input_tokens', 0),
-                      review_cost.get('output_tokens', 0)
-                  )
-                  
-                  # 合算コスト（JPY表示）
-                  total_cost_info = calculate_cost_only(total_input_tokens, total_output_tokens)
-                  
-                  # 最終出力を構築
-                  result = {
-                      'title': article_data.get('title', ''),
-                      'summary': summary_text,
-                      'snippet': snippet_result.get('snippet', ''),
-                      'selected_tags': tag_result.get('selected_tags', []),
-                      'review_feedback': review_result.get('review_feedback', ''),
-                      'model_id': model_id,
-                      'cost_breakdown': {
-                          'summary': summary_tokens,
-                          'tag_recommendation': tag_tokens,
-                          'snippet_generation': snippet_tokens,
-                          'article_review': review_tokens,
-                          'total': total_cost_info
-                      }
-                  }
-                  
-                  return result
-                  
-              except Exception as e:
-                  return {
-                      'error': f"Output formatting failed: {str(e)}",
-                      'title': '',
-                      'summary': '',
-                      'snippet': '',
-                      'selected_tags': [],
-                      'review_feedback': '',
-                      'cost_breakdown': {
-                          'summary': None,
-                          'tag_recommendation': {'input_tokens': 0, 'output_tokens': 0},
-                          'snippet_generation': {'input_tokens': 0, 'output_tokens': 0},
-                          'article_review': {'input_tokens': 0, 'output_tokens': 0},
-                          'total': {'input_tokens': 0, 'output_tokens': 0, 'input_cost_jpy': 0, 'output_cost_jpy': 0, 'total_cost_jpy': 0}
-                      }
-                  }
-
   # HTML Formatter Function (独立)
   HtmlFormatterFunction:
     Type: AWS::Lambda::Function
@@ -716,11 +566,15 @@ Resources:
       Timeout: 180
       Environment:
         Variables:
-          MAIN_FUNCTION_NAME: !Ref MainFunction
+          STATE_MACHINE_ARN: !Ref TagSelectorStateMachine
+          MODEL_ID: !Ref ModelId
+          INPUT_PRICE_PER_MILLION: !Ref InputTokenPrice
+          OUTPUT_PRICE_PER_MILLION: !Ref OutputTokenPrice
+          USD_TO_JPY: !Ref UsdToJpy
       Code:
         ZipFile: |
-          const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
-          const lambda = new LambdaClient();
+          const { SFNClient, StartSyncExecutionCommand } = require('@aws-sdk/client-sfn');
+          const sfn = new SFNClient({ region: 'us-east-1' });
           
           exports.handler = async (event) => {
             console.log('Event received:', JSON.stringify(event, null, 2));
@@ -780,25 +634,45 @@ Resources:
                 };
               }
               
-              // MainFunction を AWS SDK で呼び出し
-              const command = new InvokeCommand({
-                FunctionName: process.env.MAIN_FUNCTION_NAME,
-                Payload: JSON.stringify({ slug: slug })
+              // Step Functions を直接実行
+              const command = new StartSyncExecutionCommand({
+                stateMachineArn: process.env.STATE_MACHINE_ARN,
+                input: JSON.stringify({ 
+                  slug: slug,
+                  model_id: process.env.MODEL_ID || 'global.anthropic.claude-haiku-4-5-20251001-v1:0'
+                })
               });
               
-              const result = await lambda.send(command);
-              console.log('Lambda invoke result:', result);
-              const response = JSON.parse(new TextDecoder().decode(result.Payload));
-              console.log('Parsed response:', JSON.stringify(response, null, 2));
+              console.log('Executing Step Functions with ARN:', process.env.STATE_MACHINE_ARN);
+              const result = await sfn.send(command);
+              console.log('Step Functions result status:', result.status);
               
-              if (response.errorMessage) {
-                console.error('MainFunction error:', response.errorMessage);
-                throw new Error(response.errorMessage);
+              if (result.status !== 'SUCCEEDED') {
+                console.error('Step Functions failed:', result.error);
+                throw new Error(result.error || 'Step Functions execution failed');
               }
               
-              // MainFunctionはHTTPレスポンス形式で返すため、bodyをパース
-              const data = JSON.parse(response.body);
-              console.log('Final data:', JSON.stringify(data, null, 2));
+              const data = JSON.parse(result.output);
+              console.log('Final data received');
+              
+              // 動的コスト計算
+              const inputPrice = parseFloat(process.env.INPUT_PRICE_PER_MILLION) || 0.25;
+              const outputPrice = parseFloat(process.env.OUTPUT_PRICE_PER_MILLION) || 1.25;
+              const usdToJpy = parseFloat(process.env.USD_TO_JPY) || 150;
+              
+              if (data.cost_breakdown && data.cost_breakdown.total) {
+                const inputTokens = data.cost_breakdown.total.input_tokens || 0;
+                const outputTokens = data.cost_breakdown.total.output_tokens || 0;
+                
+                const inputCostUsd = (inputTokens / 1000000) * inputPrice;
+                const outputCostUsd = (outputTokens / 1000000) * outputPrice;
+                const totalCostUsd = inputCostUsd + outputCostUsd;
+                const totalCostJpy = totalCostUsd * usdToJpy;
+                
+                data.cost_breakdown.total.total_cost_jpy = Math.round(totalCostJpy * 100) / 100;
+                data.cost_breakdown.total.input_cost_jpy = Math.round(inputCostUsd * usdToJpy * 100) / 100;
+                data.cost_breakdown.total.output_cost_jpy = Math.round(outputCostUsd * usdToJpy * 100) / 100;
+              }
               
               const html = generateResultHTML(data);
               
@@ -808,6 +682,7 @@ Resources:
                 body: html
               };
             } catch (error) {
+              console.error('Handler error:', error);
               return {
                 statusCode: 500,
                 headers: { 'Content-Type': 'text/html; charset=utf-8' },
@@ -929,8 +804,9 @@ Resources:
               <div class="section">
                 <h2>🤖 利用モデル情報</h2>
                 <div class="model-info">
-                  <div class="cost-item"><strong>モデル:</strong> ${data.model_id || 'us.amazon.nova-lite-v1:0'}</div>
-                  <div class="cost-item"><strong>処理時間:</strong> ${data.processing_time || 'N/A'}</div>
+                  <div class="cost-item"><strong>モデル:</strong> ${data.model_id || process.env.MODEL_ID || 'us.amazon.nova-lite-v1:0'}</div>
+                  <div class="cost-item"><strong>入力トークン価格:</strong> $${process.env.INPUT_PRICE_PER_MILLION || '0.25'} / 100万トークン</div>
+                  <div class="cost-item"><strong>出力トークン価格:</strong> $${process.env.OUTPUT_PRICE_PER_MILLION || '1.25'} / 100万トークン</div>
                 </div>
               </div>
               
@@ -938,9 +814,10 @@ Resources:
                 <h2>💰 処理コスト詳細</h2>
                 <div class="cost">
                   <div class="cost-item"><strong>合計コスト:</strong> ${cost_breakdown?.total?.total_cost_jpy || 0} JPY</div>
-                  <div class="cost-item"><strong>入力トークン:</strong> ${cost_breakdown?.total?.input_tokens || 0}</div>
-                  <div class="cost-item"><strong>出力トークン:</strong> ${cost_breakdown?.total?.output_tokens || 0}</div>
+                  <div class="cost-item"><strong>入力トークン:</strong> ${cost_breakdown?.total?.input_tokens || 0} (${cost_breakdown?.total?.input_cost_jpy || 0} JPY)</div>
+                  <div class="cost-item"><strong>出力トークン:</strong> ${cost_breakdown?.total?.output_tokens || 0} (${cost_breakdown?.total?.output_cost_jpy || 0} JPY)</div>
                   <hr style="margin: 10px 0;">
+                  ${cost_breakdown?.summary ? `<div class="cost-item">記事要約: ${cost_breakdown.summary.input_tokens || 0} + ${cost_breakdown.summary.output_tokens || 0}</div>` : ''}
                   <div class="cost-item">タグ推薦: ${cost_breakdown?.tag_recommendation?.input_tokens || 0} + ${cost_breakdown?.tag_recommendation?.output_tokens || 0}</div>
                   <div class="cost-item">スニペット: ${cost_breakdown?.snippet_generation?.input_tokens || 0} + ${cost_breakdown?.snippet_generation?.output_tokens || 0}</div>
                 </div>
@@ -1036,6 +913,10 @@ Resources:
           def format_two_sentence_snippet(text):
               # テキストをクリーンアップ
               cleaned_text = text.strip()
+              
+              # Markdown見出しを除去
+              cleaned_text = re.sub(r'^#+\s*[^\n]*\n*', '', cleaned_text, flags=re.MULTILINE)
+              cleaned_text = re.sub(r'\n#+\s*[^\n]*\n*', '\n', cleaned_text, flags=re.MULTILINE)
               
               # プロンプト形式の出力を処理
               cleaned_text = re.sub(r'^第[12]文[（(][^）)]*[）)][：:]?\s*', '', cleaned_text)
