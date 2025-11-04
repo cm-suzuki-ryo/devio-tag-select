@@ -86,6 +86,28 @@ Resources:
               - Effect: Allow
                 Action: states:StartSyncExecution
                 Resource: !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:tag-selector-unified'
+
+  # HTML Formatter Lambda Execution Role (with Lambda invoke permissions)
+  HtmlFormatterLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: LambdaInvokePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt MainFunction.Arn
         - PolicyName: LambdaInvokePolicy
           PolicyDocument:
             Version: '2012-10-17'
@@ -678,33 +700,61 @@ Resources:
       FunctionName: tag-selector-html-formatter
       Runtime: nodejs20.x
       Handler: index.handler
-      Role: !GetAtt LambdaExecutionRole.Arn
+      Role: !GetAtt HtmlFormatterLambdaExecutionRole.Arn
       Timeout: 30
+      Environment:
+        Variables:
+          MAIN_FUNCTION_NAME: !Ref MainFunction
       Code:
         ZipFile: |
+          const AWS = require('aws-sdk');
+          const lambda = new AWS.Lambda();
+          
           exports.handler = async (event) => {
             try {
-              let data;
+              let slug;
               
               // HTTP リクエストの場合
               if (event.httpMethod) {
                 if (event.httpMethod === 'POST' && event.body) {
-                  data = JSON.parse(event.body);
-                } else if (event.httpMethod === 'GET' && event.queryStringParameters?.data) {
-                  data = JSON.parse(decodeURIComponent(event.queryStringParameters.data));
+                  const body = JSON.parse(event.body);
+                  slug = body.slug;
+                } else if (event.httpMethod === 'GET' && event.queryStringParameters?.slug) {
+                  slug = event.queryStringParameters.slug;
                 } else {
                   return {
                     statusCode: 400,
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ error: 'JSON data required in body (POST) or data parameter (GET)' })
+                    headers: { 'Content-Type': 'text/html; charset=utf-8' },
+                    body: generateFormHTML()
                   };
                 }
               } else {
                 // 直接呼び出しの場合
-                data = event;
+                slug = event.slug;
               }
               
-              const html = generateHTML(data);
+              if (!slug) {
+                return {
+                  statusCode: 400,
+                  headers: { 'Content-Type': 'text/html; charset=utf-8' },
+                  body: generateFormHTML('Slug parameter is required')
+                };
+              }
+              
+              // MainFunction を AWS SDK で呼び出し
+              const params = {
+                FunctionName: process.env.MAIN_FUNCTION_NAME,
+                Payload: JSON.stringify({ slug: slug })
+              };
+              
+              const result = await lambda.invoke(params).promise();
+              const data = JSON.parse(result.Payload);
+              
+              if (data.errorMessage) {
+                throw new Error(data.errorMessage);
+              }
+              
+              const html = generateResultHTML(data);
               
               return {
                 statusCode: 200,
@@ -714,13 +764,64 @@ Resources:
             } catch (error) {
               return {
                 statusCode: 500,
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ error: error.message })
+                headers: { 'Content-Type': 'text/html; charset=utf-8' },
+                body: generateErrorHTML(error.message)
               };
             }
           };
           
-          function generateHTML(data) {
+          function generateFormHTML(error = '') {
+            return `
+              <!DOCTYPE html>
+              <html>
+              <head>
+                <title>Tag Selector</title>
+                <meta charset="utf-8">
+                <style>
+                  body { font-family: Arial, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; }
+                  .form-group { margin: 20px 0; }
+                  input[type="text"] { width: 100%; padding: 10px; font-size: 16px; }
+                  button { padding: 10px 20px; font-size: 16px; background: #007cba; color: white; border: none; cursor: pointer; }
+                  .error { color: red; margin: 10px 0; }
+                </style>
+              </head>
+              <body>
+                <h1>Tag Selector</h1>
+                ${error ? `<div class="error">${error}</div>` : ''}
+                <form method="POST">
+                  <div class="form-group">
+                    <label>Article Slug:</label>
+                    <input type="text" name="slug" placeholder="Enter article slug" required>
+                  </div>
+                  <button type="submit">Analyze Article</button>
+                </form>
+              </body>
+              </html>
+            `;
+          }
+          
+          function generateErrorHTML(error) {
+            return `
+              <!DOCTYPE html>
+              <html>
+              <head>
+                <title>Error - Tag Selector</title>
+                <meta charset="utf-8">
+                <style>
+                  body { font-family: Arial, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; }
+                  .error { color: red; padding: 20px; border: 1px solid red; background: #ffe6e6; }
+                </style>
+              </head>
+              <body>
+                <h1>Error</h1>
+                <div class="error">${error}</div>
+                <a href="javascript:history.back()">Go Back</a>
+              </body>
+              </html>
+            `;
+          }
+          
+          function generateResultHTML(data) {
             const { title, summary, snippet, selected_tags, review_feedback, cost_breakdown } = data;
             
             return `<!DOCTYPE html>
@@ -1056,25 +1157,6 @@ Resources:
               
               return review_feedback, cache_info
 
-  # Function URL
-  MainFunctionUrl:
-    Type: AWS::Lambda::Url
-    Properties:
-      TargetFunctionArn: !GetAtt MainFunction.Arn
-      AuthType: NONE
-      Cors:
-        AllowCredentials: false
-        AllowMethods: [GET, POST]
-        AllowOrigins: ["*"]
-
-  MainFunctionUrlPermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !Ref MainFunction
-      Action: lambda:InvokeFunctionUrl
-      Principal: "*"
-      FunctionUrlAuthType: NONE
-
   # HTML Formatter Function URL (Protected by CloudFront)
   HtmlFormatterFunctionUrl:
     Type: AWS::Lambda::Url
@@ -1161,9 +1243,6 @@ Resources:
       SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${HtmlFormatterCloudFrontDistribution}'
 
 Outputs:
-  LambdaURL:
-    Description: 'Lambda Function URL'
-    Value: !GetAtt MainFunctionUrl.FunctionUrl
   HtmlFormatterURL:
     Description: 'HTML Formatter Function URL (Direct - Use CloudFront URL instead)'
     Value: !GetAtt HtmlFormatterFunctionUrl.FunctionUrl
