@@ -653,7 +653,11 @@ Resources:
           }
           
           function extractEntryIdFromUrl(url) {
-            const match = url.match(/\/entries\/([a-zA-Z0-9]+)/);
+            // Check if URL starts with correct Contentful space
+            if (!url.startsWith('https://app.contentful.com/spaces/ct0aopd36mqt/')) {
+              return null;
+            }
+            const match = url.match(/\/entries\/([a-zA-Z0-9]+)(?:\?|$)/);
             return match ? match[1] : null;
           }
           
