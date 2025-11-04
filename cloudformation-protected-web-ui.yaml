@@ -11,6 +11,11 @@ Parameters:
     Description: 'Contentful Access Token'
     Default: 'your-access-token'
     NoEcho: true
+  ContentfulPreviewToken:
+    Type: String
+    Description: 'Contentful Preview Token'
+    Default: 'your-preview-token'
+    NoEcho: true
   BasicAuthUser:
     Type: String
     Default: testuser
@@ -154,7 +159,7 @@ Resources:
               "Resource": "arn:aws:states:::lambda:invoke",
               "Parameters": {
                 "FunctionName": "${ContentfulGetterFunction}",
-                "Payload": {"slug.$": "$.slug", "model_id.$": "$.model_id"}
+                "Payload.$": "$"
               },
               "ResultPath": "$.article",
               "Next": "GetTags"
@@ -274,6 +279,7 @@ Resources:
         Variables:
           CONTENTFUL_SPACE_ID: !Ref ContentfulSpaceId
           CONTENTFUL_ACCESS_TOKEN: !Ref ContentfulAccessToken
+          CONTENTFUL_PREVIEW_TOKEN: !Ref ContentfulPreviewToken
           MODEL_ID: !Ref ModelId
           INPUT_PRICE_PER_MILLION: !Ref InputTokenPrice
           OUTPUT_PRICE_PER_MILLION: !Ref OutputTokenPrice
@@ -287,26 +293,47 @@ Resources:
 
           def lambda_handler(event, context):
               try:
-                  slug = event['slug']
+                  slug = event.get('slug')
+                  entry_id = event.get('entry_id')
+                  use_preview = event.get('use_preview', False)
+                  
                   space_id = os.environ['CONTENTFUL_SPACE_ID']
-                  access_token = os.environ['CONTENTFUL_ACCESS_TOKEN']
                   
-                  params = {
-                      'access_token': access_token,
-                      'content_type': 'blogPost',
-                      'fields.slug': slug,
-                      'limit': '1'
-                  }
+                  if use_preview:
+                      access_token = os.environ['CONTENTFUL_PREVIEW_TOKEN']
+                      base_url = 'https://preview.contentful.com'
+                  else:
+                      access_token = os.environ['CONTENTFUL_ACCESS_TOKEN']
+                      base_url = 'https://cdn.contentful.com'
                   
-                  url = f"https://cdn.contentful.com/spaces/{space_id}/entries?" + urllib.parse.urlencode(params)
+                  if entry_id:
+                      # Entry ID で直接取得
+                      params = {'access_token': access_token}
+                      url = f"{base_url}/spaces/{space_id}/entries/{entry_id}?" + urllib.parse.urlencode(params)
+                  elif slug:
+                      # Slug で検索
+                      params = {
+                          'access_token': access_token,
+                          'content_type': 'blogPost',
+                          'fields.slug': slug,
+                          'limit': '1'
+                      }
+                      url = f"{base_url}/spaces/{space_id}/entries?" + urllib.parse.urlencode(params)
+                  else:
+                      raise ValueError("slug or entry_id is required")
                   
                   with urllib.request.urlopen(url) as response:
                       data = json.loads(response.read().decode())
                   
-                  if not data['items']:
-                      raise Exception(f"Article not found: {slug}")
+                  if entry_id:
+                      # 直接取得の場合
+                      item = data.get('fields', {})
+                  else:
+                      # 検索の場合
+                      if not data.get('items'):
+                          raise Exception(f"Article not found: {slug}")
+                      item = data['items'][0]['fields']
                   
-                  item = data['items'][0]['fields']
                   title = item.get('title', '')
                   content = item.get('content', '')
                   blog_text = f"{title}\n\n{content}"
@@ -578,12 +605,12 @@ Resources:
           
           exports.handler = async (event) => {
             try {
-              const slug = extractSlug(event);
-              if (!slug) {
-                return createResponse(400, generateFormHTML('Slug parameter is required'));
+              const params = extractSlug(event);
+              if (!params) {
+                return createResponse(400, generateFormHTML('Contentful URL is required'));
               }
               
-              const result = await executeStepFunctions(slug);
+              const result = await executeStepFunctions(params);
               const data = JSON.parse(result.output);
               
               // 動的コスト計算
@@ -598,10 +625,13 @@ Resources:
           
           function extractSlug(event) {
             // 直接呼び出し
-            if (event.slug) return event.slug;
+            if (event.entry_id) return { entry_id: event.entry_id, use_preview: true };
             
             // HTTP GET
-            if (event.queryStringParameters?.slug) return event.queryStringParameters.slug;
+            if (event.queryStringParameters?.contentful_url) {
+              const entryId = extractEntryIdFromUrl(event.queryStringParameters.contentful_url);
+              return entryId ? { entry_id: entryId, use_preview: true } : null;
+            }
             
             // HTTP POST
             if (event.requestContext?.http?.method === 'POST' && event.body) {
@@ -609,9 +639,21 @@ Resources:
                 const bodyText = event.isBase64Encoded ? 
                   Buffer.from(event.body, 'base64').toString('utf-8') : event.body;
                 
-                return event.headers['content-type'] === 'application/x-www-form-urlencoded' ?
-                  new URLSearchParams(bodyText).get('slug') :
-                  JSON.parse(bodyText).slug;
+                if (event.headers['content-type'] === 'application/x-www-form-urlencoded') {
+                  const params = new URLSearchParams(bodyText);
+                  const contentfulUrl = params.get('contentful_url');
+                  
+                  if (contentfulUrl) {
+                    const entryId = extractEntryIdFromUrl(contentfulUrl);
+                    return entryId ? { entry_id: entryId, use_preview: true } : null;
+                  }
+                } else {
+                  const body = JSON.parse(bodyText);
+                  if (body.contentful_url) {
+                    const entryId = extractEntryIdFromUrl(body.contentful_url);
+                    return entryId ? { entry_id: entryId, use_preview: true } : null;
+                  }
+                }
               } catch (e) {
                 return null;
               }
@@ -619,11 +661,16 @@ Resources:
             return null;
           }
           
-          async function executeStepFunctions(slug) {
+          function extractEntryIdFromUrl(url) {
+            const match = url.match(/\/entries\/([a-zA-Z0-9]+)/);
+            return match ? match[1] : null;
+          }
+          
+          async function executeStepFunctions(params) {
             const command = new StartSyncExecutionCommand({
               stateMachineArn: process.env.STATE_MACHINE_ARN,
               input: JSON.stringify({ 
-                slug: slug,
+                ...params,
                 model_id: process.env.MODEL_ID || 'global.anthropic.claude-haiku-4-5-20251001-v1:0'
               })
             });
@@ -672,9 +719,10 @@ Resources:
                 <style>
                   body { font-family: Arial, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; }
                   .form-group { margin: 20px 0; }
-                  input[type="text"] { width: 100%; padding: 10px; font-size: 16px; }
+                  input[type="text"] { width: 100%; padding: 10px; font-size: 16px; box-sizing: border-box; }
                   button { padding: 10px 20px; font-size: 16px; background: #007cba; color: white; border: none; cursor: pointer; }
                   .error { color: red; margin: 10px 0; }
+                  .help-text { font-size: 14px; color: #666; margin-top: 5px; }
                 </style>
               </head>
               <body>
@@ -682,10 +730,12 @@ Resources:
                 ${error ? `<div class="error">${error}</div>` : ''}
                 <form method="POST">
                   <div class="form-group">
-                    <label>Article Slug:</label>
-                    <input type="text" name="slug" placeholder="Enter article slug" required>
+                    <label>Contentful 記事執筆URL:</label>
+                    <input type="text" id="contentful_url" name="contentful_url" placeholder="https://app.contentful.com/spaces/.../entries/..." required>
+                    <div class="help-text">Contentfulの記事編集画面のURLを入力してください（プレビュー版を取得）</div>
                   </div>
-                  <button type="submit">Analyze Article</button>
+                  
+                  <button type="submit">記事を解析</button>
                 </form>
               </body>
               </html>
