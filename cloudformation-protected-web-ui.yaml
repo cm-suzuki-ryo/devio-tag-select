@@ -18,11 +18,11 @@ Parameters:
     NoEcho: true
   BasicAuthUser:
     Type: String
-    Default: testuser
+    Default: cm
     Description: Basic Authentication Username
   BasicAuthPassword:
     Type: String
-    Default: testpass123
+    Default: cm
     NoEcho: true
     Description: Basic Authentication Password
   ModelId:
@@ -169,16 +169,7 @@ Resources:
               "Resource": "arn:aws:states:::lambda:invoke",
               "Parameters": {"FunctionName": "${TagsFunction}", "Payload": {}},
               "ResultPath": "$.tags",
-              "Next": "CheckTextLength"
-            },
-            "CheckTextLength": {
-              "Type": "Choice",
-              "Choices": [{
-                "Variable": "$.article.Payload.text_length",
-                "NumericGreaterThan": 8000,
-                "Next": "SummarizeText"
-              }],
-              "Default": "RecommendTags"
+              "Next": "SummarizeText"
             },
             "SummarizeText": {
               "Type": "Task",
@@ -811,7 +802,7 @@ Resources:
               </div>
               
               <div class="section">
-                <h2>✨ SEO スニペット</h2>
+                <h2>✨ 推薦スニペット(Excerpt)</h2>
                 <p>${snippet || 'なし'}</p>
               </div>
               
@@ -1113,18 +1104,19 @@ Resources:
   BasicAuthFunction:
     Type: AWS::CloudFront::Function
     Properties:
-      Name: !Sub 'html-formatter-basic-auth-${AWS::StackName}'
+      Name: !Sub '${AWS::StackName}-basic-auth-function'
+      AutoPublish: true
       FunctionConfig:
-        Comment: !Sub 'Basic Authentication for HTML Formatter - ${AWS::StackName}'
-        Runtime: cloudfront-js-1.0
+        Comment: !Sub 'Basic Authentication Function for ${AWS::StackName}'
+        Runtime: cloudfront-js-2.0
       FunctionCode: !Sub |
         function handler(event) {
           var request = event.request;
           var headers = request.headers;
-          
-          // testuser:testpass123 = dGVzdHVzZXI6dGVzdHBhc3MxMjM=
-          var expectedAuth = "Basic dGVzdHVzZXI6dGVzdHBhc3MxMjM=";
-          
+
+          // Expected credentials: ${BasicAuthUser}:${BasicAuthPassword}
+          var expectedAuth = "Basic " + btoa("${BasicAuthUser}:${BasicAuthPassword}");
+
           if (
             typeof headers.authorization === "undefined" ||
             headers.authorization.value !== expectedAuth
@@ -1132,13 +1124,16 @@ Resources:
             return {
               statusCode: 401,
               statusDescription: "Unauthorized",
-              headers: { "www-authenticate": { value: "Basic" } }
+              headers: { 
+                "www-authenticate": { value: "Basic realm=\"Protected Area\"" },
+                "content-type": { value: "text/plain" }
+              },
+              body: "Authentication required"
             };
           }
-          
+
           return request;
         }
-      AutoPublish: true
 
   # CloudFront Distribution for HTML Formatter
   HtmlFormatterCloudFrontDistribution:
