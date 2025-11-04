@@ -40,7 +40,7 @@ Resources:
             Statement:
               - Effect: Allow
                 Action: lambda:InvokeFunction
-                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:tag-selector-*'
+                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:tag-selector-*-${AWS::StackName}'
         - PolicyName: CloudWatchLogsPolicy
           PolicyDocument:
             Version: '2012-10-17'
@@ -85,7 +85,7 @@ Resources:
             Statement:
               - Effect: Allow
                 Action: states:StartSyncExecution
-                Resource: !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:tag-selector-unified'
+                Resource: !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:tag-selector-unified-${AWS::StackName}'
 
   # HTML Formatter Lambda Execution Role (with Lambda invoke permissions)
   HtmlFormatterLambdaExecutionRole:
@@ -120,7 +120,7 @@ Resources:
   TagSelectorStateMachine:
     Type: AWS::StepFunctions::StateMachine
     Properties:
-      StateMachineName: tag-selector-unified
+      StateMachineName: !Sub 'tag-selector-unified-${AWS::StackName}'
       StateMachineType: EXPRESS
       RoleArn: !GetAtt StepFunctionsRole.Arn
       LoggingConfiguration:
@@ -255,7 +255,7 @@ Resources:
   MainFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: tag-selector-unified-main
+      FunctionName: !Sub 'tag-selector-unified-main-${AWS::StackName}'
       Runtime: python3.11
       Handler: index.lambda_handler
       Role: !GetAtt LambdaExecutionRole.Arn
@@ -302,7 +302,7 @@ Resources:
   ContentfulGetterFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: tag-selector-contentful
+      FunctionName: !Sub 'tag-selector-contentful-${AWS::StackName}'
       Runtime: python3.11
       Handler: index.lambda_handler
       Role: !GetAtt LambdaExecutionRole.Arn
@@ -357,7 +357,7 @@ Resources:
   SummaryFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: tag-selector-summary
+      FunctionName: !Sub 'tag-selector-summary-${AWS::StackName}'
       Runtime: python3.11
       Handler: index.lambda_handler
       Role: !GetAtt LambdaExecutionRole.Arn
@@ -413,7 +413,7 @@ Resources:
   TagsFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: tag-selector-tags
+      FunctionName: !Sub 'tag-selector-tags-${AWS::StackName}'
       Runtime: python3.11
       Handler: index.lambda_handler
       Role: !GetAtt LambdaExecutionRole.Arn
@@ -462,7 +462,7 @@ Resources:
   RecommendationFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: tag-selector-recommendation
+      FunctionName: !Sub 'tag-selector-recommendation-${AWS::StackName}'
       Runtime: python3.11
       Handler: index.lambda_handler
       Role: !GetAtt LambdaExecutionRole.Arn
@@ -556,7 +556,7 @@ Resources:
   OutputFormatterFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: tag-selector-output-formatter
+      FunctionName: !Sub 'tag-selector-output-formatter-${AWS::StackName}'
       Runtime: python3.11
       Handler: index.lambda_handler
       Role: !GetAtt LambdaExecutionRole.Arn
@@ -690,7 +690,7 @@ Resources:
   HtmlFormatterFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: tag-selector-html-formatter
+      FunctionName: !Sub 'tag-selector-html-formatter-${AWS::StackName}'
       Runtime: nodejs20.x
       Handler: index.handler
       Role: !GetAtt HtmlFormatterLambdaExecutionRole.Arn
@@ -700,8 +700,8 @@ Resources:
           MAIN_FUNCTION_NAME: !Ref MainFunction
       Code:
         ZipFile: |
-          const AWS = require('aws-sdk');
-          const lambda = new AWS.Lambda();
+          const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
+          const lambda = new LambdaClient();
           
           exports.handler = async (event) => {
             try {
@@ -735,13 +735,13 @@ Resources:
               }
               
               // MainFunction を AWS SDK で呼び出し
-              const params = {
+              const command = new InvokeCommand({
                 FunctionName: process.env.MAIN_FUNCTION_NAME,
                 Payload: JSON.stringify({ slug: slug })
-              };
+              });
               
-              const result = await lambda.invoke(params).promise();
-              const data = JSON.parse(result.Payload);
+              const result = await lambda.send(command);
+              const data = JSON.parse(new TextDecoder().decode(result.Payload));
               
               if (data.errorMessage) {
                 throw new Error(data.errorMessage);
@@ -891,7 +891,7 @@ Resources:
   SnippetGeneratorFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: tag-selector-snippet-generator
+      FunctionName: !Sub 'tag-selector-snippet-generator-${AWS::StackName}'
       Runtime: python3.11
       Handler: index.lambda_handler
       Role: !GetAtt LambdaExecutionRole.Arn
@@ -1084,7 +1084,7 @@ Resources:
   ArticleReviewFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: tag-selector-article-review
+      FunctionName: !Sub 'tag-selector-article-review-${AWS::StackName}'
       Runtime: python3.11
       Handler: index.lambda_handler
       Role: !GetAtt LambdaExecutionRole.Arn
@@ -1155,19 +1155,37 @@ Resources:
     Type: AWS::Lambda::Url
     Properties:
       TargetFunctionArn: !GetAtt HtmlFormatterFunction.Arn
-      AuthType: AWS_IAM
+      AuthType: NONE
       Cors:
         AllowCredentials: false
         AllowMethods: [GET, POST]
         AllowOrigins: ["*"]
+
+  # Custom Origin Request Policy for Query Parameters
+  HtmlFormatterOriginRequestPolicy:
+    Type: AWS::CloudFront::OriginRequestPolicy
+    Properties:
+      OriginRequestPolicyConfig:
+        Name: !Sub 'HtmlFormatterOriginRequestPolicy-${AWS::StackName}'
+        Comment: 'Allow all query parameters and headers for HTML Formatter'
+        QueryStringsConfig:
+          QueryStringBehavior: all
+        HeadersConfig:
+          HeaderBehavior: whitelist
+          Headers:
+            - Content-Type
+            - User-Agent
+            - Referer
+        CookiesConfig:
+          CookieBehavior: none
 
   # Origin Access Control for HTML Formatter
   HtmlFormatterOriginAccessControl:
     Type: AWS::CloudFront::OriginAccessControl
     Properties:
       OriginAccessControlConfig:
-        Description: OAC for HTML Formatter Lambda Function URL
-        Name: HtmlFormatterOAC
+        Description: !Sub 'OAC for HTML Formatter Lambda Function URL - ${AWS::StackName}'
+        Name: !Sub 'HtmlFormatterOAC-${AWS::StackName}'
         OriginAccessControlOriginType: lambda
         SigningBehavior: always
         SigningProtocol: sigv4
@@ -1176,17 +1194,17 @@ Resources:
   BasicAuthFunction:
     Type: AWS::CloudFront::Function
     Properties:
-      Name: html-formatter-basic-auth
+      Name: !Sub 'html-formatter-basic-auth-${AWS::StackName}'
       FunctionConfig:
-        Comment: Basic Authentication for HTML Formatter
+        Comment: !Sub 'Basic Authentication for HTML Formatter - ${AWS::StackName}'
         Runtime: cloudfront-js-1.0
       FunctionCode: !Sub |
         function handler(event) {
           var request = event.request;
           var headers = request.headers;
           
-          // ${BasicAuthUser}:${BasicAuthPassword} encoded in base64
-          var expectedAuth = "Basic " + btoa("${BasicAuthUser}:${BasicAuthPassword}");
+          // testuser:testpass123 = dGVzdHVzZXI6dGVzdHBhc3MxMjM=
+          var expectedAuth = "Basic dGVzdHVzZXI6dGVzdHBhc3MxMjM=";
           
           if (
             typeof headers.authorization === "undefined" ||
@@ -1201,6 +1219,7 @@ Resources:
           
           return request;
         }
+      AutoPublish: true
 
   # CloudFront Distribution for HTML Formatter
   HtmlFormatterCloudFrontDistribution:
@@ -1209,19 +1228,20 @@ Resources:
     Properties:
       DistributionConfig:
         Enabled: true
-        Comment: Protected HTML Formatter with Basic Auth
+        Comment: !Sub 'Protected HTML Formatter with Basic Auth - ${AWS::StackName}'
         Origins:
           - Id: HtmlFormatterOrigin
             DomainName: !Select [2, !Split ['/', !GetAtt HtmlFormatterFunctionUrl.FunctionUrl]]
             CustomOriginConfig:
               HTTPPort: 443
               OriginProtocolPolicy: https-only
-            OriginAccessControlId: !GetAtt HtmlFormatterOriginAccessControl.Id
         DefaultCacheBehavior:
           TargetOriginId: HtmlFormatterOrigin
           ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT]
+          CachedMethods: [GET, HEAD]
           CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
-          OriginRequestPolicyId: 88a5eaf4-2fd4-4709-b370-b4c650ea3fcf  # CORS-S3Origin
+          OriginRequestPolicyId: !Ref HtmlFormatterOriginRequestPolicy
           FunctionAssociations:
             - EventType: viewer-request
               FunctionARN: !GetAtt BasicAuthFunction.FunctionARN
@@ -1232,8 +1252,8 @@ Resources:
     Properties:
       FunctionName: !Ref HtmlFormatterFunction
       Action: lambda:InvokeFunctionUrl
-      Principal: cloudfront.amazonaws.com
-      SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${HtmlFormatterCloudFrontDistribution}'
+      Principal: "*"
+      FunctionUrlAuthType: NONE
 
 Outputs:
   HtmlFormatterURL:
