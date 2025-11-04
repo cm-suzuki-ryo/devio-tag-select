@@ -577,119 +577,90 @@ Resources:
           const sfn = new SFNClient({ region: 'us-east-1' });
           
           exports.handler = async (event) => {
-            console.log('Event received:', JSON.stringify(event, null, 2));
             try {
-              let slug;
-              
-              // HTTP リクエストの場合
-              if (event.requestContext && event.requestContext.http) {
-                const httpMethod = event.requestContext.http.method;
-                console.log('HTTP Method:', httpMethod);
-                console.log('Query Parameters:', event.queryStringParameters);
-                console.log('Body:', event.body);
-                
-                if (httpMethod === 'POST' && event.body) {
-                  try {
-                    let bodyText = event.body;
-                    if (event.isBase64Encoded) {
-                      bodyText = Buffer.from(event.body, 'base64').toString('utf-8');
-                    }
-                    console.log('Decoded body:', bodyText);
-                    
-                    // form-urlencoded形式をパース
-                    if (event.headers['content-type'] === 'application/x-www-form-urlencoded') {
-                      const params = new URLSearchParams(bodyText);
-                      slug = params.get('slug');
-                      console.log('Parsed slug from form:', slug);
-                    } else {
-                      const body = JSON.parse(bodyText);
-                      slug = body.slug;
-                      console.log('Parsed slug from JSON:', slug);
-                    }
-                  } catch (error) {
-                    console.error('Error parsing body:', error);
-                    slug = undefined;
-                  }
-                } else if (httpMethod === 'GET' && event.queryStringParameters?.slug) {
-                  slug = event.queryStringParameters.slug;
-                } else {
-                  return {
-                    statusCode: 400,
-                    headers: { 'Content-Type': 'text/html; charset=utf-8' },
-                    body: generateFormHTML()
-                  };
-                }
-              } else {
-                // 直接呼び出しの場合
-                slug = event.slug;
-              }
-              
-              console.log('Extracted slug:', slug);
-              
+              const slug = extractSlug(event);
               if (!slug) {
-                return {
-                  statusCode: 400,
-                  headers: { 'Content-Type': 'text/html; charset=utf-8' },
-                  body: generateFormHTML('Slug parameter is required')
-                };
+                return createResponse(400, generateFormHTML('Slug parameter is required'));
               }
               
-              // Step Functions を直接実行
-              const command = new StartSyncExecutionCommand({
-                stateMachineArn: process.env.STATE_MACHINE_ARN,
-                input: JSON.stringify({ 
-                  slug: slug,
-                  model_id: process.env.MODEL_ID || 'global.anthropic.claude-haiku-4-5-20251001-v1:0'
-                })
-              });
-              
-              console.log('Executing Step Functions with ARN:', process.env.STATE_MACHINE_ARN);
-              const result = await sfn.send(command);
-              console.log('Step Functions result status:', result.status);
-              
-              if (result.status !== 'SUCCEEDED') {
-                console.error('Step Functions failed:', result.error);
-                throw new Error(result.error || 'Step Functions execution failed');
-              }
-              
+              const result = await executeStepFunctions(slug);
               const data = JSON.parse(result.output);
-              console.log('Final data received');
               
               // 動的コスト計算
-              const inputPrice = parseFloat(process.env.INPUT_PRICE_PER_MILLION) || 0.25;
-              const outputPrice = parseFloat(process.env.OUTPUT_PRICE_PER_MILLION) || 1.25;
-              const usdToJpy = parseFloat(process.env.USD_TO_JPY) || 150;
+              calculateCosts(data);
               
-              if (data.cost_breakdown && data.cost_breakdown.total) {
-                const inputTokens = data.cost_breakdown.total.input_tokens || 0;
-                const outputTokens = data.cost_breakdown.total.output_tokens || 0;
-                
-                const inputCostUsd = (inputTokens / 1000000) * inputPrice;
-                const outputCostUsd = (outputTokens / 1000000) * outputPrice;
-                const totalCostUsd = inputCostUsd + outputCostUsd;
-                const totalCostJpy = totalCostUsd * usdToJpy;
-                
-                data.cost_breakdown.total.total_cost_jpy = Math.round(totalCostJpy * 100) / 100;
-                data.cost_breakdown.total.input_cost_jpy = Math.round(inputCostUsd * usdToJpy * 100) / 100;
-                data.cost_breakdown.total.output_cost_jpy = Math.round(outputCostUsd * usdToJpy * 100) / 100;
-              }
-              
-              const html = generateResultHTML(data);
-              
-              return {
-                statusCode: 200,
-                headers: { 'Content-Type': 'text/html; charset=utf-8' },
-                body: html
-              };
+              return createResponse(200, generateResultHTML(data));
             } catch (error) {
               console.error('Handler error:', error);
-              return {
-                statusCode: 500,
-                headers: { 'Content-Type': 'text/html; charset=utf-8' },
-                body: generateErrorHTML(error.message)
-              };
+              return createResponse(500, generateErrorHTML(error.message));
             }
           };
+          
+          function extractSlug(event) {
+            // 直接呼び出し
+            if (event.slug) return event.slug;
+            
+            // HTTP GET
+            if (event.queryStringParameters?.slug) return event.queryStringParameters.slug;
+            
+            // HTTP POST
+            if (event.requestContext?.http?.method === 'POST' && event.body) {
+              try {
+                const bodyText = event.isBase64Encoded ? 
+                  Buffer.from(event.body, 'base64').toString('utf-8') : event.body;
+                
+                return event.headers['content-type'] === 'application/x-www-form-urlencoded' ?
+                  new URLSearchParams(bodyText).get('slug') :
+                  JSON.parse(bodyText).slug;
+              } catch (e) {
+                return null;
+              }
+            }
+            return null;
+          }
+          
+          async function executeStepFunctions(slug) {
+            const command = new StartSyncExecutionCommand({
+              stateMachineArn: process.env.STATE_MACHINE_ARN,
+              input: JSON.stringify({ 
+                slug: slug,
+                model_id: process.env.MODEL_ID || 'global.anthropic.claude-haiku-4-5-20251001-v1:0'
+              })
+            });
+            
+            const result = await sfn.send(command);
+            if (result.status !== 'SUCCEEDED') {
+              throw new Error(result.error || 'Step Functions execution failed');
+            }
+            return result;
+          }
+          
+          function calculateCosts(data) {
+            const inputPrice = parseFloat(process.env.INPUT_PRICE_PER_MILLION) || 0.25;
+            const outputPrice = parseFloat(process.env.OUTPUT_PRICE_PER_MILLION) || 1.25;
+            const usdToJpy = parseFloat(process.env.USD_TO_JPY) || 150;
+            
+            if (data.cost_breakdown?.total) {
+              const { input_tokens = 0, output_tokens = 0 } = data.cost_breakdown.total;
+              const inputCostUsd = (input_tokens / 1000000) * inputPrice;
+              const outputCostUsd = (output_tokens / 1000000) * outputPrice;
+              const totalCostJpy = (inputCostUsd + outputCostUsd) * usdToJpy;
+              
+              Object.assign(data.cost_breakdown.total, {
+                total_cost_jpy: Math.round(totalCostJpy * 100) / 100,
+                input_cost_jpy: Math.round(inputCostUsd * usdToJpy * 100) / 100,
+                output_cost_jpy: Math.round(outputCostUsd * usdToJpy * 100) / 100
+              });
+            }
+          }
+          
+          function createResponse(statusCode, body) {
+            return {
+              statusCode,
+              headers: { 'Content-Type': 'text/html; charset=utf-8' },
+              body
+            };
+          }
           
           function generateFormHTML(error = '') {
             return `
@@ -1027,76 +998,6 @@ Resources:
               
               snippet_text = format_two_sentence_snippet(snippet_text)
               return snippet_text, cache_info
-
-  # Article Review Function
-  ArticleReviewFunction:
-    Type: AWS::Lambda::Function
-    Properties:
-      FunctionName: !Sub 'tag-selector-article-review-${AWS::StackName}'
-      Runtime: python3.11
-      Handler: index.lambda_handler
-      Role: !GetAtt LambdaExecutionRole.Arn
-      Timeout: 300
-      Code:
-        ZipFile: |
-          import json
-          import boto3
-          import os
-
-          def lambda_handler(event, context):
-              try:
-                  title = event.get('title', '')
-                  content = event.get('content', '')
-                  model_id = event.get('model_id', 'global.anthropic.claude-haiku-4-5-20251001-v1:0')
-                  
-                  if not title and not content:
-                      raise ValueError("title or content is required")
-                  
-                  article_json = {"title": title, "content": content}
-                  review_feedback, cache_info = generate_review_feedback(article_json, model_id)
-                  
-                  return {
-                      'review_feedback': review_feedback,
-                      'cache_info': cache_info,
-                      'model_id': model_id
-                  }
-              except Exception as e:
-                  raise Exception(f"Article review failed: {str(e)}")
-
-          def generate_review_feedback(article_json, model_id):
-              bedrock = boto3.client('bedrock-runtime', region_name='us-west-2')
-              
-              prompt = "# 役割と目標\\nあなたは、テックブログの編集者と校正役です。\\n提供されたJSON形式の記事データ（タイトルと本文）を、技術的な正確性を保ちつつ、検索性・可読性・説得力を高めるために編集サポートをします。\\n読者はAWSの基礎知識を持つ技術者と想定し、建設的なトーンを維持してください。\\n\\n# 実行手順と出力形式\\n\\n以下の順序でフィードバックを構成し、Markdownを使って構造化して出力すること。\\n\\n## 1. 全体的なフィードバック\\n* 記事の技術的正確性、構成、検証の流れについて簡潔に評価する。\\n\\n## 2. 表記と文法の編集\\n* 修正提案を必ず表形式（オリジナル/提案/理由）で出力する。\\n* 冗長表現、口語表現、文法ミス（句読点、助詞の重複）、専門用語の表記統一を指摘し、修正案を提示する。\\n\\n# 記事データ\\n" + json.dumps(article_json, ensure_ascii=False, indent=2)
-              
-              if 'nova' in model_id.lower():
-                  body = {
-                      "messages": [{"role": "user", "content": [{"text": prompt}]}],
-                      "inferenceConfig": {"temperature": 0.3, "maxTokens": 8192}
-                  }
-                  response = bedrock.invoke_model(modelId=model_id, body=json.dumps(body))
-                  response_body = json.loads(response['body'].read())
-                  review_feedback = response_body['output']['message']['content'][0]['text']
-                  cache_info = {
-                      'input_tokens': response_body['usage']['inputTokens'],
-                      'output_tokens': response_body['usage']['outputTokens']
-                  }
-              else:
-                  body = {
-                      "anthropic_version": "bedrock-2023-05-31",
-                      "max_tokens": 8192,
-                      "temperature": 0.3,
-                      "system": [{"type": "text", "text": "あなたはテックブログの編集者と校正役です。"}],
-                      "messages": [{"role": "user", "content": prompt}]
-                  }
-                  response = bedrock.invoke_model(modelId=model_id, body=json.dumps(body))
-                  response_body = json.loads(response['body'].read())
-                  review_feedback = response_body['content'][0]['text']
-                  cache_info = {
-                      'input_tokens': response_body['usage']['input_tokens'],
-                      'output_tokens': response_body['usage']['output_tokens']
-                  }
-              
-              return review_feedback, cache_info
 
   # HTML Formatter Function URL (Protected by CloudFront)
   HtmlFormatterFunctionUrl:
