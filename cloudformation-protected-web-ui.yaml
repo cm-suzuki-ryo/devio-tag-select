@@ -589,10 +589,11 @@ Resources:
           INPUT_PRICE_PER_MILLION: !Ref InputTokenPrice
           OUTPUT_PRICE_PER_MILLION: !Ref OutputTokenPrice
           USD_TO_JPY: !Ref UsdToJpy
+          AWS_REGION: !Ref AWS::Region
       Code:
         ZipFile: |
           const { SFNClient, StartSyncExecutionCommand } = require('@aws-sdk/client-sfn');
-          const sfn = new SFNClient({ region: '${AWS::Region}' });
+          const sfn = new SFNClient({ region: process.env.AWS_REGION });
           
           exports.handler = async (event) => {
             try {
