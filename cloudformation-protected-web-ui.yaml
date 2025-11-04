@@ -592,7 +592,7 @@ Resources:
       Code:
         ZipFile: |
           const { SFNClient, StartSyncExecutionCommand } = require('@aws-sdk/client-sfn');
-          const sfn = new SFNClient({ region: 'us-east-1' });
+          const sfn = new SFNClient({ region: '${AWS::Region}' });
           
           exports.handler = async (event) => {
             try {
