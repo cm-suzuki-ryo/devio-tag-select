@@ -1,0 +1,226 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Lambda Function URL with robots.txt support and Basic Auth protected by CloudFront OAC'
+
+Parameters:
+  BasicAuthUser:
+    Type: String
+    Default: admin
+    Description: Basic Authentication Username
+    MinLength: 3
+    MaxLength: 20
+  
+  BasicAuthPassword:
+    Type: String
+    NoEcho: true
+    Description: Basic Authentication Password
+    MinLength: 8
+    MaxLength: 50
+
+Resources:
+  # Lambda Execution Role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  # Lambda Function with robots.txt support
+  HelloWorldFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-hello-world-function'
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import os
+          
+          def lambda_handler(event, context):
+              return {
+                  'statusCode': 200,
+                  'headers': {
+                      'Content-Type': 'application/json'
+                  },
+                  'body': json.dumps({
+                      'message': 'Hello World from Lambda!',
+                      'requestId': context.aws_request_id,
+                      'timestamp': context.get_remaining_time_in_millis()
+                  })
+              }
+
+  # Lambda Function URL
+  LambdaFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt HelloWorldFunction.Arn
+      AuthType: AWS_IAM
+      Cors:
+        AllowCredentials: false
+        AllowMethods: [GET, POST]
+        AllowOrigins: ["*"]
+
+  # CloudFront Function for robots.txt
+  RobotsTxtFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub '${AWS::StackName}-robots-txt-function'
+      AutoPublish: true
+      FunctionConfig:
+        Comment: !Sub 'Robots.txt function for ${AWS::StackName}'
+        Runtime: cloudfront-js-2.0
+      FunctionCode: |
+        function handler(event) {
+          return {
+            statusCode: 200,
+            statusDescription: 'OK',
+            headers: {
+              'content-type': { value: 'text/plain' },
+              'cache-control': { value: 'public, max-age=86400' }
+            },
+            body: 'User-agent: *\nDisallow: /'
+          };
+        }
+
+  # CloudFront Function for Basic Authentication
+  BasicAuthFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub '${AWS::StackName}-basic-auth-function'
+      AutoPublish: true
+      FunctionConfig:
+        Comment: !Sub 'Basic Authentication Function for ${AWS::StackName}'
+        Runtime: cloudfront-js-2.0
+      FunctionCode: !Sub |
+        function handler(event) {
+          var request = event.request;
+          var headers = request.headers;
+          
+          // Expected credentials: ${BasicAuthUser}:${BasicAuthPassword}
+          var expectedAuth = "Basic " + btoa("${BasicAuthUser}:${BasicAuthPassword}");
+          
+          if (
+            typeof headers.authorization === "undefined" ||
+            headers.authorization.value !== expectedAuth
+          ) {
+            return {
+              statusCode: 401,
+              statusDescription: "Unauthorized",
+              headers: { 
+                "www-authenticate": { value: "Basic realm=\"Protected Area\"" },
+                "content-type": { value: "text/plain" }
+              },
+              body: "Authentication required"
+            };
+          }
+          
+          return request;
+        }
+
+  # Response Headers Policy for noindex
+  NoIndexResponseHeadersPolicy:
+    Type: AWS::CloudFront::ResponseHeadersPolicy
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: !Sub '${AWS::StackName}-noindex-policy'
+        Comment: 'Add noindex meta tag to responses'
+        CustomHeadersConfig:
+          Items:
+            - Header: X-Robots-Tag
+              Value: noindex
+              Override: false
+
+  # Origin Access Control
+  OriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Description: !Sub 'OAC for ${AWS::StackName} Lambda Function URL'
+        Name: !Sub '${AWS::StackName}-lambda-oac'
+        OriginAccessControlOriginType: lambda
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # CloudFront Distribution
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    DependsOn:
+      - LambdaFunctionUrl
+      - OriginAccessControl
+      - NoIndexResponseHeadersPolicy
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub '${AWS::StackName} - Lambda Function URL with OAC and robots.txt'
+        Origins:
+          - Id: LambdaOrigin
+            DomainName: !Select [2, !Split ['/', !GetAtt LambdaFunctionUrl.FunctionUrl]]
+            CustomOriginConfig:
+              HTTPPort: 443
+              OriginProtocolPolicy: https-only
+            OriginAccessControlId: !GetAtt OriginAccessControl.Id
+        DefaultCacheBehavior:
+          TargetOriginId: LambdaOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
+          ResponseHeadersPolicyId: !Ref NoIndexResponseHeadersPolicy
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt BasicAuthFunction.FunctionMetadata.FunctionARN
+        CacheBehaviors:
+          - PathPattern: robots.txt
+            TargetOriginId: LambdaOrigin
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6  # Managed-CachingOptimized
+            FunctionAssociations:
+              - EventType: viewer-request
+                FunctionARN: !GetAtt RobotsTxtFunction.FunctionMetadata.FunctionARN
+
+  # Lambda Permission for CloudFront Distribution (Function URL)
+  LambdaInvokeFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    DependsOn: CloudFrontDistribution
+    Properties:
+      FunctionName: !Ref HelloWorldFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: cloudfront.amazonaws.com
+      SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}'
+
+  # Lambda Permission for CloudFront Distribution (Function Invoke)
+  LambdaInvokeFunctionPermission:
+    Type: AWS::Lambda::Permission
+    DependsOn: CloudFrontDistribution
+    Properties:
+      FunctionName: !Ref HelloWorldFunction
+      Action: lambda:InvokeFunction
+      Principal: cloudfront.amazonaws.com
+      SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}'
+
+Outputs:
+  LambdaFunctionUrl:
+    Description: Lambda Function URL (Direct access - use CloudFront URL instead)
+    Value: !GetAtt LambdaFunctionUrl.FunctionUrl
+  
+  CloudFrontURL:
+    Description: CloudFront Distribution URL (Use this URL for access)
+    Value: !Sub 'https://${CloudFrontDistribution.DomainName}'
+  
+  RobotsTxtURL:
+    Description: Robots.txt URL (No Basic Auth required)
+    Value: !Sub 'https://${CloudFrontDistribution.DomainName}/robots.txt'
+  
+  CloudFrontDistributionId:
+    Description: CloudFront Distribution ID
+    Value: !Ref CloudFrontDistribution
+  
+  BasicAuthUsername:
+    Description: Basic Authentication Username
+    Value: !Ref BasicAuthUser

@@ -13,7 +13,8 @@ def get_article_from_contentful(slug):
     """Contentfulから記事を取得"""
     http = urllib3.PoolManager()
     access_token = os.environ.get('CONTENTFUL_ACCESS_TOKEN')
-    url = f"https://cdn.contentful.com/spaces/ct0aopd36mqt/entries?limit=1&fields.slug={slug}&locale=ja&access_token={access_token}&content_type=blogPost&select=fields.content,fields.title"
+    space_id = os.environ.get('CONTENTFUL_SPACE_ID', 'ct0aopd36mqt')
+    url = f"https://cdn.contentful.com/spaces/{space_id}/entries?limit=1&fields.slug={slug}&locale=ja&access_token={access_token}&content_type=blogPost&select=fields.content,fields.title"
     
     response = http.request('GET', url)
     data = json.loads(response.data.decode('utf-8'))
@@ -49,7 +50,8 @@ def get_tags_from_contentful_cached():
     # Contentful APIから取得
     http = urllib3.PoolManager()
     access_token = os.environ.get('CONTENTFUL_ACCESS_TOKEN')
-    url = f"https://cdn.contentful.com/spaces/ct0aopd36mqt/entries?limit=1&select=fields.tags&access_token={access_token}&content_type=blogTags"
+    space_id = os.environ.get('CONTENTFUL_SPACE_ID', 'ct0aopd36mqt')
+    url = f"https://cdn.contentful.com/spaces/{space_id}/entries?limit=1&select=fields.tags&access_token={access_token}&content_type=blogTags"
     
     response = http.request('GET', url)
     data = json.loads(response.data.decode('utf-8'))
@@ -82,6 +84,18 @@ def get_tags_from_contentful_cached():
             json.dump(cache_data, f, ensure_ascii=False)
     except Exception:
         pass  # 保存エラーは無視
+
+def get_all_tags():
+    """全タグデータを取得"""
+    global TAGS_CACHE
+    if TAGS_CACHE is None:
+        result = get_tags_from_contentful_cached()
+        if result and len(result) >= 2:
+            tags_data, _ = result
+            return tags_data
+        else:
+            return []  # エラー時は空リストを返す
+    return TAGS_CACHE
     
     return tags_data, content_hash
 
