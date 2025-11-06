@@ -230,7 +230,8 @@ Resources:
           Overrides:
             - InstanceType: !Ref InstanceType
         InstancesDistribution:
-          OnDemandPercentage: !Ref OnDemandPercentage
+          OnDemandBaseCapacity: 0
+          OnDemandPercentageAboveBaseCapacity: !Ref OnDemandPercentage
           SpotAllocationStrategy: lowest-price
       MinSize: !Ref MinSize
       MaxSize: !Ref MaxSize
