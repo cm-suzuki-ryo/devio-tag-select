@@ -299,21 +299,26 @@ Resources:
                   
                   if entry_id:
                       # Entry ID で直接取得
-                      params = {'access_token': access_token}
-                      url = f"{base_url}/spaces/{space_id}/entries/{entry_id}?" + urllib.parse.urlencode(params)
+                      url = f"{base_url}/spaces/{space_id}/entries/{entry_id}"
                   elif slug:
                       # Slug で検索
                       params = {
-                          'access_token': access_token,
                           'content_type': 'blogPost',
                           'fields.slug': slug,
                           'limit': '1'
                       }
+                      if not use_preview:
+                          params['access_token'] = access_token
                       url = f"{base_url}/spaces/{space_id}/entries?" + urllib.parse.urlencode(params)
                   else:
                       raise ValueError("slug or entry_id is required")
                   
-                  with urllib.request.urlopen(url) as response:
+                  # Create request with proper headers
+                  req = urllib.request.Request(url)
+                  if use_preview:
+                      req.add_header('Authorization', f'Bearer {access_token}')
+                  
+                  with urllib.request.urlopen(req) as response:
                       data = json.loads(response.read().decode())
                   
                   if entry_id:
